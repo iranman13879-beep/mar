@@ -38,17 +38,28 @@ def solo_finished_keyboard() -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
-def pvp_invite_keyboard(game_id: int) -> InlineKeyboardMarkup:
+def pvp_lobby_keyboard(game_id: int, bot_username: str, max_players: int) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="✅ قبول می‌کنم", callback_data=f"pvp:accept:{game_id}")
-    b.button(text="❌ رد می‌کنم", callback_data=f"pvp:decline:{game_id}")
-    b.adjust(2)
+    b.button(text="👥 پیوستن به لابی", callback_data=f"lobby:join:{game_id}")
+    if bot_username:
+        b.button(
+            text="🎮 ادامه بازی در ربات",
+            url=f"https://t.me/{bot_username}?start=game_{game_id}",
+        )
+    b.button(text="❌ لغو لابی", callback_data=f"lobby:cancel:{game_id}")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def pvp_invite_keyboard(game_id: int) -> InlineKeyboardMarkup:
+    # Kept for compatibility with older imports.
+    b = InlineKeyboardBuilder()
+    b.button(text="👥 پیوستن به لابی", callback_data=f"lobby:join:{game_id}")
+    b.adjust(1)
     return b.as_markup()
 
 
 def pvp_roll_keyboard(game_id: int, can_roll: bool = True) -> InlineKeyboardMarkup:
-    # این پیام بین هر دو بازیکن مشترکه، پس متن دکمه خنثی‌ه؛ نوبت واقعی توی
-    # کپشن بالای عکس مشخصه و سمت سرور هم موقع کلیک چک می‌شه.
     b = InlineKeyboardBuilder()
     b.button(text="🎲 تاس بنداز", callback_data=f"pvp:roll:{game_id}")
     b.adjust(1)
@@ -57,11 +68,36 @@ def pvp_roll_keyboard(game_id: int, can_roll: bool = True) -> InlineKeyboardMark
 
 def pvp_finished_keyboard() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="⚔️ چالش جدید", callback_data="menu:pvp")
+    b.button(text="⚔️ بازی جدید", callback_data="menu:pvp")
     b.button(text="🔙 بازگشت به منو", callback_data="menu:main")
     b.adjust(1)
     return b.as_markup()
 
+
+def private_game_keyboard(game_id: int) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="🎲 تاس بنداز", callback_data=f"pvp:roll:{game_id}")
+    b.button(text="❌ خروج از بازی", callback_data=f"pvp:leave:{game_id}")
+    b.adjust(1)
+    return b.as_markup()
+
+
+
+def pvp_mode_keyboard() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="👥 لابی ۲ نفره", callback_data="pvp:create:2")
+    b.button(text="👥 لابی ۴ نفره", callback_data="pvp:create:4")
+    b.button(text="🔙 بازگشت", callback_data="menu:main")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def lobby_cancel_keyboard(game_id: int) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="👥 پیوستن به لابی", callback_data=f"lobby:join:{game_id}")
+    b.button(text="❌ لغو لابی", callback_data=f"lobby:cancel:{game_id}")
+    b.adjust(1)
+    return b.as_markup()
 
 def admin_menu() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()

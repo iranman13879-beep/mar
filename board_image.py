@@ -109,7 +109,9 @@ def _draw_ladder(draw: ImageDraw.ImageDraw, start_xy, end_xy):
 
 
 def render_board(p1_pos: int = 0, p2_pos: int | None = None,
-                  p1_label: str = "P1", p2_label: str = "P2") -> bytes:
+                  p1_label: str = "P1", p2_label: str = "P2",
+                  p3_pos: int | None = None, p4_pos: int | None = None,
+                  p3_label: str = "P3", p4_label: str = "P4") -> bytes:
     board_px = CELL_PX * BOARD_N
     width = board_px + MARGIN_PX * 2
     height = board_px + MARGIN_PX * 2 + HEADER_PX
@@ -160,8 +162,21 @@ def render_board(p1_pos: int = 0, p2_pos: int | None = None,
         _draw_ladder(draw, cell_to_xy(start), cell_to_xy(end))
 
     # --- مهره‌های بازیکن‌ها ---
+    token_colors = [P1_COLOR, P2_COLOR, (60, 190, 120), (175, 85, 220)]
+    positions = [p1_pos, p2_pos, p3_pos, p4_pos]
+    labels = ["1", "2", "3", "4"]
+    names = [p1_label, p2_label, p3_label, p4_label]
+
+    active = [(i, pos) for i, pos in enumerate(positions) if pos is not None]
+    offsets = {
+        1: [0],
+        2: [-10, 10],
+        3: [-13, 0, 13],
+        4: [-14, -5, 5, 14],
+    }.get(len(active), [0])
+
     def draw_token(pos, color, label, side_offset):
-        if pos <= 0:
+        if pos is None or pos <= 0:
             return
         x, y = cell_to_xy(pos)
         x += side_offset
@@ -170,19 +185,18 @@ def render_board(p1_pos: int = 0, p2_pos: int | None = None,
         f = _font(13)
         draw.text((x, y), label, font=f, fill="white", anchor="mm")
 
-    draw_token(p1_pos, P1_COLOR, "1", -10 if p2_pos is not None else 0)
-    if p2_pos is not None:
-        draw_token(p2_pos, P2_COLOR, "2", 10)
+    for offset, (i, pos) in zip(offsets, active):
+        draw_token(pos, token_colors[i], labels[i], offset)
 
     # --- راهنما ---
-    legend_font = _font(15, bold=False)
+    legend_font = _font(14, bold=False)
     ly = height - 6
-    draw.ellipse([MARGIN_PX, ly - 16, MARGIN_PX + 14, ly - 2], fill=P1_COLOR)
-    draw.text((MARGIN_PX + 20, ly - 16), p1_label, font=legend_font, fill="white")
-    if p2_pos is not None:
-        lx2 = MARGIN_PX + 160
-        draw.ellipse([lx2, ly - 16, lx2 + 14, ly - 2], fill=P2_COLOR)
-        draw.text((lx2 + 20, ly - 16), p2_label, font=legend_font, fill="white")
+    x = MARGIN_PX
+    for i, pos in active:
+        draw.ellipse([x, ly - 16, x + 14, ly - 2], fill=token_colors[i])
+        label = names[i][:14]
+        draw.text((x + 20, ly - 16), label, font=legend_font, fill="white")
+        x += 190
 
     buf = io.BytesIO()
     img = img.convert("RGB")

@@ -18,16 +18,25 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS games (
     game_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    game_type TEXT NOT NULL,
+    game_type TEXT NOT NULL,          -- 'solo' or 'pvp'
     chat_id INTEGER NOT NULL,
     message_id INTEGER,
     player1_id INTEGER NOT NULL,
     player2_id INTEGER,
+    player3_id INTEGER,
+    player4_id INTEGER,
     player1_pos INTEGER NOT NULL DEFAULT 0,
     player2_pos INTEGER NOT NULL DEFAULT 0,
+    player3_pos INTEGER NOT NULL DEFAULT 0,
+    player4_pos INTEGER NOT NULL DEFAULT 0,
+    max_players INTEGER NOT NULL DEFAULT 2,
+    player1_message_id INTEGER,
+    player2_message_id INTEGER,
+    player3_message_id INTEGER,
+    player4_message_id INTEGER,
     turn INTEGER NOT NULL DEFAULT 1,
     stake INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'active',
+    status TEXT NOT NULL DEFAULT 'active', -- active/finished/cancelled
     winner_id INTEGER,
     created_at REAL NOT NULL DEFAULT 0
 );
@@ -42,6 +51,22 @@ CREATE TABLE IF NOT EXISTS settings (
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(_SCHEMA)
+        # Migration for older installations.
+        cur = await db.execute("PRAGMA table_info(games)")
+        columns = {row[1] for row in await cur.fetchall()}
+        for col, definition in [
+            ("player3_id", "INTEGER"),
+            ("player4_id", "INTEGER"),
+            ("player3_pos", "INTEGER NOT NULL DEFAULT 0"),
+            ("player4_pos", "INTEGER NOT NULL DEFAULT 0"),
+            ("max_players", "INTEGER NOT NULL DEFAULT 2"),
+            ("player1_message_id", "INTEGER"),
+            ("player2_message_id", "INTEGER"),
+            ("player3_message_id", "INTEGER"),
+            ("player4_message_id", "INTEGER"),
+        ]:
+            if col not in columns:
+                await db.execute(f"ALTER TABLE games ADD COLUMN {col} {definition}")
         for k, v in DEFAULT_SETTINGS.items():
             await db.execute(
                 "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v)
@@ -94,6 +119,7 @@ async def get_or_create_user(user_id: int, username: str, first_name: str) -> di
             cur = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
             row = await cur.fetchone()
         else:
+            # keep username/first_name fresh
             await db.execute(
                 "UPDATE users SET username = ?, first_name = ? WHERE user_id = ?",
                 (username or "", first_name or "", user_id),
@@ -215,43 +241,59 @@ async def stats_summary() -> dict:
 # ---------------- games ----------------
 
 async def create_game(game_type: str, chat_id: int, player1_id: int,
-                       player2_id: int | None, stake: int) -> int:
+                       player2_id: int | None, stake: int,
+                       max_players: int = 2,
+                       player3_id: int | None = None,
+                       player4_id: int | None = None) -> int:
+    max_players = 4 if max_players == 4 else 2
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO games (game_type, chat_id, player1_id, player2_id, stake, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (game_type, chat_id, player1_id, player2_id, stake, time.time()),
+            "INSERT INTO games (game_type, chat_id, player1_id, player2_id, player3_id, player4_id, "
+            "stake, max_players, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (game_type, chat_id, player1_id, player2_id, player3_id, player4_id,
+             stake, max_players, time.time()),
         )
         await db.commit()
         return cur.lastrowid
 
 
+async def add_player_to_lobby(game_id: int, user_id: int) -> tuple[bool, str]:
+    """Atomically add a user to the next free slot. Returns (success, reason)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute("SELECT game_id, game_type, chat_id, message_id, player1_id, player2_id, player3_id, player4_id, player1_pos, player2_pos, player3_pos, player4_pos, max_players, player1_message_id, player2_message_id, player3_message_id, player4_message_id, turn, stake, status, winner_id, created_at FROM games WHERE game_id = ?", (game_id,))
+        row = await cur.fetchone()
+        if not row:
+            await db.rollback()
+            return False, "not_found"
+        game = _game_row_to_dict(row)
+        if game["status"] != "pending":
+            await db.rollback()
+            return False, "closed"
+        players = [game["player1_id"], game["player2_id"], game["player3_id"], game["player4_id"]]
+        if user_id in [p for p in players if p]:
+            await db.rollback()
+            return True, "already"
+        if len([p for p in players if p]) >= game["max_players"]:
+            await db.rollback()
+            return False, "full"
+        slot = next(i for i, p in enumerate(players, 1) if p is None)
+        col = f"player{slot}_id"
+        await db.execute(f"UPDATE games SET {col} = ? WHERE game_id = ?", (user_id, game_id))
+        await db.commit()
+        return True, "joined"
+
+
+async def lobby_players(game_id: int) -> list[int]:
+    game = await get_game(game_id)
+    if not game:
+        return []
+    return [p for p in [game["player1_id"], game["player2_id"], game["player3_id"], game["player4_id"]] if p]
+
+
 async def get_game(game_id: int) -> dict | None:
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT * FROM games WHERE game_id = ?", (game_id,))
-        row = await cur.fetchone()
-        return _game_row_to_dict(row) if row else None
-
-
-async def get_game_by_message(chat_id: int, message_id: int) -> dict | None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(
-            "SELECT * FROM games WHERE chat_id = ? AND message_id = ? "
-            "ORDER BY game_id DESC LIMIT 1",
-            (chat_id, message_id),
-        )
-        row = await cur.fetchone()
-        return _game_row_to_dict(row) if row else None
-
-
-async def get_active_game_for_player(chat_id: int, user_id: int) -> dict | None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(
-            "SELECT * FROM games WHERE chat_id = ? AND status = 'active' "
-            "AND (player1_id = ? OR player2_id = ?) "
-            "ORDER BY game_id DESC LIMIT 1",
-            (chat_id, user_id, user_id),
-        )
+        cur = await db.execute("SELECT game_id, game_type, chat_id, message_id, player1_id, player2_id, player3_id, player4_id, player1_pos, player2_pos, player3_pos, player4_pos, max_players, player1_message_id, player2_message_id, player3_message_id, player4_message_id, turn, stake, status, winner_id, created_at FROM games WHERE game_id = ?", (game_id,))
         row = await cur.fetchone()
         return _game_row_to_dict(row) if row else None
 
@@ -259,8 +301,11 @@ async def get_active_game_for_player(chat_id: int, user_id: int) -> dict | None:
 def _game_row_to_dict(row) -> dict:
     keys = [
         "game_id", "game_type", "chat_id", "message_id", "player1_id", "player2_id",
-        "player1_pos", "player2_pos", "turn", "stake", "status", "winner_id", "created_at",
+        "player3_id", "player4_id", "player1_pos", "player2_pos", "player3_pos",
+        "player4_pos", "max_players", "player1_message_id", "player2_message_id",
+        "player3_message_id", "player4_message_id", "turn", "stake", "status", "winner_id", "created_at",
     ]
+    # Backward-compatible guard for databases created by very old versions.
     return dict(zip(keys, row))
 
 
@@ -273,12 +318,30 @@ async def update_game_message(game_id: int, message_id: int):
 
 
 async def update_game_position(game_id: int, player_slot: int, new_pos: int):
-    col = "player1_pos" if player_slot == 1 else "player2_pos"
+    if player_slot not in (1, 2, 3, 4):
+        raise ValueError("invalid player slot")
+    col = f"player{player_slot}_pos"
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             f"UPDATE games SET {col} = ? WHERE game_id = ?", (new_pos, game_id)
         )
         await db.commit()
+
+
+async def update_player_message(game_id: int, player_slot: int, message_id: int):
+    if player_slot not in (1, 2, 3, 4):
+        raise ValueError("invalid player slot")
+    col = f"player{player_slot}_message_id"
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(f"UPDATE games SET {col} = ? WHERE game_id = ?", (message_id, game_id))
+        await db.commit()
+
+
+async def get_player_slot(game: dict, user_id: int) -> int | None:
+    for slot in range(1, game["max_players"] + 1):
+        if game.get(f"player{slot}_id") == user_id:
+            return slot
+    return None
 
 
 async def set_turn(game_id: int, turn: int):
@@ -293,4 +356,10 @@ async def finish_game(game_id: int, winner_id: int | None, status: str = "finish
             "UPDATE games SET status = ?, winner_id = ? WHERE game_id = ?",
             (status, winner_id, game_id),
         )
+        await db.commit()
+
+
+async def set_game_status(game_id: int, status: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE games SET status = ? WHERE game_id = ?", (status, game_id))
         await db.commit()

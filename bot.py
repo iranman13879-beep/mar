@@ -23,6 +23,7 @@ async def main():
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=MemoryStorage())
 
+    # ترتیب مهمه: ادمین اول (فیلتر داخلی خودش داره)، بعد بازی، بعد کاربر عادی
     dp.include_router(admin.router)
     dp.include_router(game.router)
     dp.include_router(user.router)
@@ -31,7 +32,7 @@ async def main():
     logger.info("دیتابیس آماده شد. ربات در حال اجراست...")
 
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
