@@ -146,37 +146,55 @@ async def cb_solo_cancel(callback: CallbackQuery):
 
 
 # ============================================================
-#                    MULTIPLAYER LOBBY / PVP
+#                    MULTIPLAYER MATCHMAKING
 # ============================================================
-
-async def _bot_username(bot: Bot) -> str:
-    me = await bot.get_me()
-    return me.username or ""
-
 
 def _players_from_game(game: dict) -> list[int]:
     return [game[f"player{i}_id"] for i in range(1, game["max_players"] + 1)
             if game.get(f"player{i}_id")]
 
 
-async def _lobby_text(game: dict) -> str:
+async def _send_private_game_view(bot: Bot, game: dict, user_id: int):
+    slot = await db.get_player_slot(game, user_id)
+    if not slot:
+        return False
+
+    if game["status"] != "active":
+        await bot.send_message(user_id, "❌ این بازی دیگر فعال نیست.")
+        return True
+
     players = _players_from_game(game)
-    lines = [
-        "🎮 <b>لابی مار و پله</b>",
-        "",
-        f"👥 ظرفیت: <b>{game['max_players']} نفر</b>",
-        f"💰 شرط: <b>{game['stake']} سکه</b> برای هر نفر",
-        "",
-        f"👤 بازیکنان: <b>{len(players)}/{game['max_players']}</b>",
-    ]
-    for i, uid in enumerate(players, 1):
-        u = await db.get_user(uid)
-        lines.append(f"  {i}. {_name_of(u, uid)}")
-    if len(players) < game["max_players"]:
-        lines.append("\n⏳ منتظر بازیکن‌های دیگر...")
-    else:
-        lines.append("\n🔥 لابی تکمیل شد! همه روی «ادامه بازی در ربات» بزنید.")
-    return "\n".join(lines)
+    names = []
+    for i in range(1, game["max_players"] + 1):
+        u = await db.get_user(game[f"player{i}_id"])
+        names.append(_name_of(u, game[f"player{i}_id"]))
+
+    positions = [game[f"player{i}_pos"] for i in range(1, game["max_players"] + 1)]
+    img = render_board(
+        p1_pos=positions[0],
+        p2_pos=positions[1] if len(positions) > 1 else None,
+        p3_pos=positions[2] if len(positions) > 2 else None,
+        p4_pos=positions[3] if len(positions) > 3 else None,
+        p1_label=names[0],
+        p2_label=names[1] if len(names) > 1 else "P2",
+        p3_label=names[2] if len(names) > 2 else "P3",
+        p4_label=names[3] if len(names) > 3 else "P4",
+    )
+    turn_name = names[game["turn"] - 1]
+    caption = (
+        f"⚔️ <b>مار و پله {game['max_players']} نفره</b>\n"
+        f"💰 شرط هر نفر: {game['stake']} سکه\n\n"
+        f"🎯 نوبت: <b>{turn_name}</b>\n"
+        f"📍 موقعیت تو: خانه {game[f'player{slot}_pos']}"
+    )
+    sent = await bot.send_photo(
+        user_id,
+        BufferedInputFile(img, filename="board.png"),
+        caption=caption,
+        reply_markup=kb.private_game_keyboard(game["game_id"]),
+    )
+    await db.update_player_message(game["game_id"], slot, sent.message_id)
+    return True
 
 
 @router.callback_query(F.data == "menu:pvp")
@@ -184,21 +202,26 @@ async def cb_pvp_intro(callback: CallbackQuery):
     default_stake = await db.get_setting("pvp_default_stake")
     text = (
         "⚔️ <b>بازی چندنفره مار و پله</b>\n\n"
-        f"💰 شرط پیش‌فرض: <b>{default_stake} سکه</b> برای هر نفر\n\n"
-        "دیگه لازم نیست آیدی کسی رو وارد کنی! 😎\n"
-        "یک لابی بساز، لینک «پیوستن به لابی» رو در گروه بفرست "
-        "و دوستانت وارد لابی بشن.\n\n"
-        "حداکثر تا <b>۴ نفر</b> می‌تونن همزمان بازی کنن."
+        "🎯 اول مشخص کن چند نفره بازی کنی، بعد «جستجو» شروع می‌شود.\n"
+        "بات به‌صورت خودکار بازیکن‌های منتظر را پیدا می‌کند و بازی را داخل چت خصوصی بات شروع می‌کند.\n\n"
+        f"💰 شرط هر نفر: <b>{default_stake} سکه</b>\n"
+        "🎲 حالت‌ها: ۲، ۳ یا ۴ نفره\n\n"
+        "🔥 لازم نیست آیدی کسی را وارد کنی یا لابی بسازی!"
     )
     await callback.message.edit_text(text, reply_markup=kb.pvp_mode_keyboard())
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("pvp:create:"))
-async def cb_create_lobby(callback: CallbackQuery, bot: Bot):
-    max_players = int(callback.data.split(":")[2])
-    if max_players not in (2, 4):
-        await callback.answer("ظرفیت نامعتبر است.", show_alert=True)
+@router.callback_query(F.data.startswith("pvp:search:"))
+async def cb_matchmaking_search(callback: CallbackQuery, bot: Bot):
+    try:
+        max_players = int(callback.data.split(":")[2])
+    except (ValueError, IndexError):
+        await callback.answer("تعداد بازیکنان نامعتبر است.", show_alert=True)
+        return
+
+    if max_players not in (2, 3, 4):
+        await callback.answer("تعداد بازیکنان نامعتبر است.", show_alert=True)
         return
 
     user = await db.get_or_create_user(
@@ -210,133 +233,62 @@ async def cb_create_lobby(callback: CallbackQuery, bot: Bot):
 
     stake = await db.get_setting("pvp_default_stake")
     if user["coins"] < stake:
-        await callback.answer(f"💸 برای ورود به لابی حداقل {stake} سکه لازم داری.", show_alert=True)
+        await callback.answer(f"💸 برای بازی حداقل {stake} سکه لازم داری.", show_alert=True)
         return
 
-    game_id = await db.create_game(
-        "pvp", callback.message.chat.id, callback.from_user.id, None, stake, max_players=max_players
+    status, game_id, players = await db.matchmaking_join(
+        callback.from_user.id, max_players, stake
     )
-    await db.set_game_status(game_id, "pending")
 
-    username = await _bot_username(bot)
-    text = await _lobby_text(await db.get_game(game_id))
-    try:
-        await callback.message.edit_text(
-            text, reply_markup=kb.pvp_lobby_keyboard(game_id, username, max_players)
+    if status == "waiting":
+        count = await db.matchmaking_count(max_players, stake)
+        text = (
+            "🔎 <b>جستجوی حریف شروع شد!</b>\n\n"
+            f"👥 حالت: <b>{max_players} نفره</b>\n"
+            f"💰 شرط: <b>{stake} سکه</b>\n\n"
+            f"⏳ بازیکنان آماده: <b>{count}/{max_players}</b>\n"
+            "منتظر بازیکن‌های دیگر هستیم...\n\n"
+            "وقتی ظرفیت کامل شود، بازی خودکار داخل بات شروع می‌شود. 🎮"
         )
-    except Exception:
-        sent = await callback.message.answer(
-            text, reply_markup=kb.pvp_lobby_keyboard(game_id, username, max_players)
-        )
-        await db.update_game_message(game_id, sent.message_id)
-    else:
-        await db.update_game_message(game_id, callback.message.message_id)
-    await callback.answer("✅ لابی ساخته شد! لینک لابی را با دوستانت به اشتراک بگذار.")
-
-
-@router.callback_query(F.data.startswith("lobby:join:"))
-async def cb_join_lobby(callback: CallbackQuery, bot: Bot):
-    game_id = int(callback.data.split(":")[2])
-    game = await db.get_game(game_id)
-    if not game or game["status"] != "pending":
-        await callback.answer("این لابی بسته شده.", show_alert=True)
-        return
-
-    user = await db.get_or_create_user(
-        callback.from_user.id, callback.from_user.username, callback.from_user.first_name
-    )
-    if user["is_banned"]:
-        await callback.answer("⛔️ شما مسدود شده‌اید.", show_alert=True)
-        return
-
-    if user["coins"] < game["stake"]:
-        await callback.answer(f"💸 برای ورود {game['stake']} سکه لازم داری.", show_alert=True)
-        return
-
-    ok, reason = await db.add_player_to_lobby(game_id, callback.from_user.id)
-    if not ok:
-        if reason == "already":
-            username = await _bot_username(bot)
-            if username:
-                await callback.answer(
-                    "🎮 تو قبلاً وارد لابی شدی؛ ادامه بازی در ربات.",
-                    url=f"https://t.me/{username}?start=game_{game_id}",
-                )
-            else:
-                await callback.answer("✅ تو قبلاً وارد لابی شدی.", show_alert=True)
-            return
-        messages = {
-            "full": "❌ لابی پر شده است.",
-            "closed": "❌ این لابی دیگر فعال نیست.",
-            "not_found": "❌ لابی پیدا نشد.",
-        }
-        await callback.answer(messages.get(reason, "❌ ورود به لابی ناموفق بود."), show_alert=True)
-        return
-
-    game = await db.get_game(game_id)
-    players = _players_from_game(game)
-
-    # وقتی ظرفیت تکمیل شد، شرط همه به صورت اتمیکِ مرحله شروع از حساب‌ها کم می‌شود.
-    if len(players) == game["max_players"]:
-        # Re-check balances because multiple users can press simultaneously.
-        balances_ok = True
-        for uid in players:
-            u = await db.get_user(uid)
-            if not u or u["coins"] < game["stake"]:
-                balances_ok = False
-                break
-        if not balances_ok:
-            await callback.answer("❌ حداقل یکی از بازیکنان سکه کافی ندارد؛ لابی فعلاً منتظر است.", show_alert=True)
-        else:
-            for uid in players:
-                await db.add_coins(uid, -game["stake"])
-            await db.set_game_status(game_id, "active")
-            await db.set_turn(game_id, 1)
-
-    game = await db.get_game(game_id)
-    text = await _lobby_text(game)
-    username = await _bot_username(bot)
-
-    if game["status"] == "active":
-        text += "\n\n🎯 <b>بازی شروع شد!</b>\nهر بازیکن برای ورود و بازی، روی «ادامه بازی در ربات» بزند."
-        # Only lobby creator's message can be edited reliably in the group.
         try:
-            await bot.edit_message_text(
-                text,
-                chat_id=game["chat_id"],
-                message_id=game["message_id"],
-                reply_markup=kb.pvp_lobby_keyboard(game_id, username, game["max_players"]),
-            )
+            await callback.message.edit_text(text, reply_markup=kb.matchmaking_wait_keyboard())
         except Exception:
-            pass
-    else:
+            await callback.message.answer(text, reply_markup=kb.matchmaking_wait_keyboard())
+        await callback.answer("🔎 در حال پیدا کردن حریف...")
+        return
+
+    game = await db.get_game(game_id)
+    if not game:
+        await callback.answer("❌ بازی ساخته نشد؛ دوباره تلاش کن.", show_alert=True)
+        return
+
+    # همه بازیکنان بلافاصله به چت خصوصی بات هدایت می‌شوند و صفحه بازی را می‌گیرند.
+    for uid in players:
         try:
-            await callback.message.edit_text(
-                text, reply_markup=kb.pvp_lobby_keyboard(game_id, username, game["max_players"])
-            )
-            await db.update_game_message(game_id, callback.message.message_id)
+            await bot.send_message(uid, "🔥 <b>حریف پیدا شد!</b> بازی شما آماده است؛ تاس بندازید!", parse_mode="HTML")
+            await _send_private_game_view(bot, game, uid)
         except Exception:
+            # اگر کاربر قبلاً بات را استارت نکرده باشد، پیام تلگرام ممکن است خطا بدهد.
             pass
 
-    await callback.answer("✅ وارد لابی شدی!")
+    await callback.message.edit_text(
+        "🎉 <b>حریف پیدا شد!</b>\n\n"
+        f"⚔️ بازی {max_players} نفره ساخته شد.\n"
+        "🎮 بازی داخل چت خصوصی بات برایت باز شد.\n\n"
+        "اگر صفحه بازی را نمی‌بینی، بات را باز کن و دوباره /start بزن.",
+        reply_markup=kb.back_to_menu(),
+    )
+    await callback.answer("🎉 حریف پیدا شد!", show_alert=False)
 
 
-@router.callback_query(F.data.startswith("lobby:cancel:"))
-async def cb_cancel_lobby(callback: CallbackQuery, bot: Bot):
-    game_id = int(callback.data.split(":")[2])
-    game = await db.get_game(game_id)
-    if not game or game["status"] != "pending":
-        await callback.answer()
-        return
-    if callback.from_user.id != game["player1_id"]:
-        await callback.answer("فقط سازنده لابی می‌تواند آن را لغو کند.", show_alert=True)
-        return
-    await db.finish_game(game_id, winner_id=None, status="cancelled")
-    try:
-        await callback.message.edit_text("❌ لابی لغو شد.")
-    except Exception:
-        pass
-    await callback.answer("لابی لغو شد.")
+@router.callback_query(F.data == "match:cancel")
+async def cb_matchmaking_cancel(callback: CallbackQuery):
+    removed = await db.matchmaking_cancel(callback.from_user.id)
+    if removed:
+        await callback.message.edit_text("❌ جستجوی حریف لغو شد.", reply_markup=kb.back_to_menu())
+        await callback.answer("جستجو لغو شد.")
+    else:
+        await callback.answer("جستجوی فعالی نداری.", show_alert=True)
 
 
 async def _send_private_game_view(bot: Bot, game: dict, user_id: int):

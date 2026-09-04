@@ -45,6 +45,13 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS matchmaking_queue (
+    user_id INTEGER PRIMARY KEY,
+    max_players INTEGER NOT NULL,
+    stake INTEGER NOT NULL DEFAULT 0,
+    joined_at REAL NOT NULL DEFAULT 0
+);
 """
 
 
@@ -372,3 +379,107 @@ async def set_game_status(game_id: int, status: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE games SET status = ? WHERE game_id = ?", (status, game_id))
         await db.commit()
+
+
+# ---------------- matchmaking ----------------
+
+async def matchmaking_join(user_id: int, max_players: int, stake: int) -> tuple[str, int | None, list[int]]:
+    """Join a random matchmaking queue. Returns (status, game_id, players).
+    status is 'waiting' or 'matched'. Matching and stake deduction happen atomically.
+    """
+    if max_players not in (2, 3, 4):
+        raise ValueError("max_players must be 2, 3 or 4")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        # A user can only be in one matchmaking queue at a time.
+        await db.execute("DELETE FROM matchmaking_queue WHERE user_id = ?", (user_id,))
+
+        cur = await db.execute(
+            "SELECT q.user_id FROM matchmaking_queue q "
+            "JOIN users u ON u.user_id = q.user_id "
+            "WHERE q.max_players = ? AND q.stake = ? AND u.is_banned = 0 "
+            "ORDER BY q.joined_at ASC",
+            (max_players, stake),
+        )
+        candidates = [r[0] for r in await cur.fetchall() if r[0] != user_id]
+
+        # Drop users who no longer have enough coins.
+        valid = []
+        for uid in candidates:
+            cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (uid,))
+            row = await cur.fetchone()
+            if row and row[0] >= stake:
+                valid.append(uid)
+            else:
+                await db.execute("DELETE FROM matchmaking_queue WHERE user_id = ?", (uid,))
+            if len(valid) >= max_players - 1:
+                break
+
+        if len(valid) < max_players - 1:
+            await db.execute(
+                "INSERT INTO matchmaking_queue (user_id, max_players, stake, joined_at) VALUES (?, ?, ?, ?)",
+                (user_id, max_players, stake, time.time()),
+            )
+            await db.commit()
+            return "waiting", None, [user_id] + valid
+
+        players = valid[:max_players - 1] + [user_id]
+        # Verify every player's balance while the write lock is held.
+        for uid in players:
+            cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (uid,))
+            row = await cur.fetchone()
+            if not row or row[0] < stake:
+                # Put the current user back in the queue; the stale candidate will be removed.
+                await db.execute("DELETE FROM matchmaking_queue WHERE user_id = ?", (uid,))
+                await db.execute(
+                    "INSERT OR REPLACE INTO matchmaking_queue (user_id, max_players, stake, joined_at) VALUES (?, ?, ?, ?)",
+                    (user_id, max_players, stake, time.time()),
+                )
+                await db.commit()
+                return "waiting", None, [user_id]
+
+        for uid in players:
+            await db.execute("UPDATE users SET coins = coins - ? WHERE user_id = ?", (stake, uid))
+            await db.execute("DELETE FROM matchmaking_queue WHERE user_id = ?", (uid,))
+
+        placeholders = [None, None, None, None]
+        for i, uid in enumerate(players):
+            placeholders[i] = uid
+        cur = await db.execute(
+            "INSERT INTO games (game_type, chat_id, player1_id, player2_id, player3_id, player4_id, "
+            "stake, max_players, status, turn, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("pvp", 0, placeholders[0], placeholders[1], placeholders[2], placeholders[3],
+             stake, max_players, "active", 1, time.time()),
+        )
+        game_id = cur.lastrowid
+        await db.commit()
+        return "matched", game_id, players
+
+
+async def matchmaking_cancel(user_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("DELETE FROM matchmaking_queue WHERE user_id = ?", (user_id,))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def matchmaking_get(user_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT user_id, max_players, stake, joined_at FROM matchmaking_queue WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return None
+        return {"user_id": row[0], "max_players": row[1], "stake": row[2], "joined_at": row[3]}
+
+
+async def matchmaking_count(max_players: int, stake: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM matchmaking_queue WHERE max_players = ? AND stake = ?",
+            (max_players, stake),
+        )
+        (count,) = await cur.fetchone()
+        return count

@@ -5,7 +5,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(text="🎮 بازی تکی", callback_data="menu:solo")
-    b.button(text="⚔️ چالش با دوست", callback_data="menu:pvp")
+    b.button(text="⚔️ بازی چندنفره", callback_data="menu:pvp")
     b.button(text="💰 موجودی من", callback_data="menu:profile")
     b.button(text="🏆 برترین‌ها", callback_data="menu:leaderboard")
     b.button(text="🎁 جایزه روزانه", callback_data="menu:daily")
@@ -85,17 +85,18 @@ def private_game_keyboard(game_id: int) -> InlineKeyboardMarkup:
 
 def pvp_mode_keyboard() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="👥 لابی ۲ نفره", callback_data="pvp:create:2")
-    b.button(text="👥 لابی ۴ نفره", callback_data="pvp:create:4")
+    b.button(text="👥 ۲ نفره", callback_data="pvp:search:2")
+    b.button(text="👥 ۳ نفره", callback_data="pvp:search:3")
+    b.button(text="👥 ۴ نفره", callback_data="pvp:search:4")
     b.button(text="🔙 بازگشت", callback_data="menu:main")
     b.adjust(1)
     return b.as_markup()
 
 
-def lobby_cancel_keyboard(game_id: int) -> InlineKeyboardMarkup:
+def matchmaking_wait_keyboard() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="👥 پیوستن به لابی", callback_data=f"lobby:join:{game_id}")
-    b.button(text="❌ لغو لابی", callback_data=f"lobby:cancel:{game_id}")
+    b.button(text="❌ لغو جستجو", callback_data="match:cancel")
+    b.button(text="🔄 تغییر تعداد نفرات", callback_data="menu:pvp")
     b.adjust(1)
     return b.as_markup()
 
