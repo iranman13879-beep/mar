@@ -1,6 +1,13 @@
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message, BufferedInputFile, InputMediaPhoto
+from aiogram.types import (
+    CallbackQuery,
+    Message,
+    BufferedInputFile,
+    InputMediaPhoto,
+    MessageReactionUpdated,
+    ReactionTypeEmoji,
+)
 
 import database as db
 import keyboards as kb
@@ -8,6 +15,8 @@ from board_image import render_board
 from game_logic import roll_dice, apply_move
 
 router = Router(name="game")
+
+DICE_EMOJI = "🎲"
 
 
 def _name_of(user_row: dict | None, fallback_id: int) -> str:
@@ -47,7 +56,7 @@ async def cb_start_solo(callback: CallbackQuery, bot: Bot):
         f"🎮 <b>بازی تکی شروع شد!</b>\n"
         f"هزینه ورود: {fee} سکه\n"
         f"موقعیت: خانه 0\n\n"
-        f"🎲 دکمه رو بزن تا تاس بندازی."
+        f"🎲 دکمه رو بزن یا روی این پیام ری‌اکشن 🎲 بزن تا تاس بندازی."
     )
     try:
         await callback.message.delete()
@@ -63,23 +72,14 @@ async def cb_start_solo(callback: CallbackQuery, bot: Bot):
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("solo:roll:"))
-async def cb_solo_roll(callback: CallbackQuery, bot: Bot):
-    game_id = int(callback.data.split(":")[2])
-    game = await db.get_game(game_id)
-    if not game or game["status"] != "active":
-        await callback.answer("این بازی دیگه فعال نیست.", show_alert=True)
-        return
-    if callback.from_user.id != game["player1_id"]:
-        await callback.answer("این بازیِ تو نیست 😅", show_alert=True)
-        return
-
+async def _perform_solo_roll(bot: Bot, game: dict, chat_id: int, message_id: int) -> dict:
+    game_id = game["game_id"]
     dice = roll_dice()
     result = apply_move(game["player1_pos"], dice)
     await db.update_game_position(game_id, 1, result["final_to"])
 
-    user = await db.get_user(callback.from_user.id)
-    name = _name_of(user, callback.from_user.id)
+    user = await db.get_user(game["player1_id"])
+    name = _name_of(user, game["player1_id"])
 
     event_text = ""
     if result["event"] == "overshoot":
@@ -91,9 +91,9 @@ async def cb_solo_roll(callback: CallbackQuery, bot: Bot):
 
     if result["won"]:
         reward = await db.get_setting("solo_win_reward")
-        await db.add_coins(callback.from_user.id, reward)
-        await db.increment_stats(callback.from_user.id, won=True)
-        await db.finish_game(game_id, winner_id=callback.from_user.id)
+        await db.add_coins(game["player1_id"], reward)
+        await db.increment_stats(game["player1_id"], won=True)
+        await db.finish_game(game_id, winner_id=game["player1_id"])
 
         img = render_board(p1_pos=100, p1_label=name)
         caption = (
@@ -105,12 +105,11 @@ async def cb_solo_roll(callback: CallbackQuery, bot: Bot):
         await bot.edit_message_media(
             media=InputMediaPhoto(media=BufferedInputFile(img, filename="board.png"),
                                    caption=caption, parse_mode="HTML"),
-            chat_id=callback.message.chat.id,
-            message_id=callback.message.message_id,
+            chat_id=chat_id,
+            message_id=message_id,
             reply_markup=kb.solo_finished_keyboard(),
         )
-        await callback.answer("🏆 بردی!")
-        return
+        return result
 
     img = render_board(p1_pos=result["final_to"], p1_label=name)
     caption_lines = [f"🎮 <b>بازی تکی</b> — {name}", f"🎲 تاس: {dice}"]
@@ -121,11 +120,26 @@ async def cb_solo_roll(callback: CallbackQuery, bot: Bot):
     await bot.edit_message_media(
         media=InputMediaPhoto(media=BufferedInputFile(img, filename="board.png"),
                                caption=caption, parse_mode="HTML"),
-        chat_id=callback.message.chat.id,
-        message_id=callback.message.message_id,
+        chat_id=chat_id,
+        message_id=message_id,
         reply_markup=kb.solo_roll_keyboard(game_id),
     )
-    await callback.answer()
+    return result
+
+
+@router.callback_query(F.data.startswith("solo:roll:"))
+async def cb_solo_roll(callback: CallbackQuery, bot: Bot):
+    game_id = int(callback.data.split(":")[2])
+    game = await db.get_game(game_id)
+    if not game or game["status"] != "active":
+        await callback.answer("این بازی دیگه فعال نیست.", show_alert=True)
+        return
+    if callback.from_user.id != game["player1_id"]:
+        await callback.answer("این بازیِ تو نیست 😅", show_alert=True)
+        return
+
+    result = await _perform_solo_roll(bot, game, callback.message.chat.id, callback.message.message_id)
+    await callback.answer("🏆 بردی!" if result["won"] else None)
 
 
 @router.callback_query(F.data.startswith("solo:cancel:"))
@@ -234,7 +248,6 @@ async def cmd_pvp(message: Message, bot: Bot):
         "pvp", message.chat.id, message.from_user.id, opponent_id, stake
     )
     await db.finish_game(game_id, winner_id=None, status="pending")
-    # finish_game فقط برای تغییر status استفاده شده، بازی هنوز واقعا تموم نشده
 
     challenger_name = _name_of(challenger, message.from_user.id)
     opponent_name = "@" + opponent_username if opponent_username else (opponent_first_name or str(opponent_id))
@@ -316,19 +329,10 @@ async def cb_pvp_decline(callback: CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("pvp:roll:"))
-async def cb_pvp_roll(callback: CallbackQuery, bot: Bot):
-    game_id = int(callback.data.split(":")[2])
-    game = await db.get_game(game_id)
-    if not game or game["status"] != "active":
-        await callback.answer("این بازی دیگه فعال نیست.", show_alert=True)
-        return
-
+async def _perform_pvp_roll(bot: Bot, game: dict, chat_id: int, message_id: int) -> dict:
+    game_id = game["game_id"]
     is_p1_turn = game["turn"] == 1
     current_player_id = game["player1_id"] if is_p1_turn else game["player2_id"]
-    if callback.from_user.id != current_player_id:
-        await callback.answer("صبر کن، نوبت توئه نیست! ⏳", show_alert=True)
-        return
 
     p1 = await db.get_user(game["player1_id"])
     p2 = await db.get_user(game["player2_id"])
@@ -371,12 +375,11 @@ async def cb_pvp_roll(callback: CallbackQuery, bot: Bot):
         await bot.edit_message_media(
             media=InputMediaPhoto(media=BufferedInputFile(img, filename="board.png"),
                                    caption=caption, parse_mode="HTML"),
-            chat_id=callback.message.chat.id,
-            message_id=callback.message.message_id,
+            chat_id=chat_id,
+            message_id=message_id,
             reply_markup=kb.pvp_finished_keyboard(),
         )
-        await callback.answer("🏆 بردی!")
-        return
+        return result
 
     next_turn = 2 if is_p1_turn else 1
     await db.set_turn(game_id, next_turn)
@@ -389,12 +392,62 @@ async def cb_pvp_roll(callback: CallbackQuery, bot: Bot):
     caption_lines.append(f"\nنوبت: {next_player_name} 🎲")
     caption = "\n".join(caption_lines)
 
-    next_player_id = game["player2_id"] if next_turn == 2 else game["player1_id"]
     await bot.edit_message_media(
         media=InputMediaPhoto(media=BufferedInputFile(img, filename="board.png"),
                                caption=caption, parse_mode="HTML"),
-        chat_id=callback.message.chat.id,
-        message_id=callback.message.message_id,
+        chat_id=chat_id,
+        message_id=message_id,
         reply_markup=kb.pvp_roll_keyboard(game_id, can_roll=True),
     )
-    await callback.answer()
+    return result
+
+
+@router.callback_query(F.data.startswith("pvp:roll:"))
+async def cb_pvp_roll(callback: CallbackQuery, bot: Bot):
+    game_id = int(callback.data.split(":")[2])
+    game = await db.get_game(game_id)
+    if not game or game["status"] != "active":
+        await callback.answer("این بازی دیگه فعال نیست.", show_alert=True)
+        return
+
+    is_p1_turn = game["turn"] == 1
+    current_player_id = game["player1_id"] if is_p1_turn else game["player2_id"]
+    if callback.from_user.id != current_player_id:
+        await callback.answer("صبر کن، نوبت توئه نیست! ⏳", show_alert=True)
+        return
+
+    result = await _perform_pvp_roll(bot, game, callback.message.chat.id, callback.message.message_id)
+    await callback.answer("🏆 بردی!" if result["won"] else None)
+
+
+# ============================================================
+#                 REACTION-BASED DICE ROLL (🎲)
+# ============================================================
+
+@router.message_reaction()
+async def on_dice_reaction(reaction: MessageReactionUpdated, bot: Bot):
+    new_emojis = {
+        r.emoji for r in reaction.new_reaction
+        if isinstance(r, ReactionTypeEmoji)
+    }
+    if DICE_EMOJI not in new_emojis:
+        return
+    if reaction.user is None:
+        return
+
+    game = await db.get_game_by_message(reaction.chat.id, reaction.message_id)
+    if not game or game["status"] != "active":
+        return
+
+    user_id = reaction.user.id
+
+    if game["game_type"] == "solo":
+        if user_id != game["player1_id"]:
+            return
+        await _perform_solo_roll(bot, game, reaction.chat.id, reaction.message_id)
+    else:
+        is_p1_turn = game["turn"] == 1
+        current_player_id = game["player1_id"] if is_p1_turn else game["player2_id"]
+        if user_id != current_player_id:
+            return
+        await _perform_pvp_roll(bot, game, reaction.chat.id, reaction.message_id)
