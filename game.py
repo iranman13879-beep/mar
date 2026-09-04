@@ -1,44 +1,26 @@
-import logging
-
 from aiogram import Router, F, Bot
-from aiogram.types import (
-    CallbackQuery,
-    Message,
-    BufferedInputFile,
-    InputMediaPhoto,
-)
+from aiogram.types import CallbackQuery, Message, BufferedInputFile, InputMediaPhoto
 
 import database as db
 import keyboards as kb
-
 from board_image import render_board
 from game_logic import roll_dice, apply_move
 
-
 router = Router(name="game")
-
-logger = logging.getLogger(__name__)
 
 
 # ============================================================
 # HELPERS
 # ============================================================
 
-def _name_of(user: dict | None, user_id: int) -> str:
-    if not user:
-        return str(user_id)
+def _name_of(user_row: dict | None, fallback_id: int) -> str:
+    if not user_row:
+        return str(fallback_id)
 
-    username = user.get("username")
+    if user_row.get("username"):
+        return "@" + user_row["username"]
 
-    if username:
-        return "@" + username
-
-    first_name = user.get("first_name")
-
-    if first_name:
-        return first_name
-
-    return str(user_id)
+    return user_row.get("first_name") or str(fallback_id)
 
 
 async def _bot_username(bot: Bot) -> str:
@@ -47,93 +29,24 @@ async def _bot_username(bot: Bot) -> str:
 
 
 def _players_from_game(game: dict) -> list[int]:
-    max_players = int(game.get("max_players") or 2)
-
     players = []
 
-    for i in range(1, max_players + 1):
-        user_id = game.get(f"player{i}_id")
+    max_players = int(game.get("max_players") or 2)
 
-        if user_id:
-            players.append(user_id)
+    for i in range(1, max_players + 1):
+        uid = game.get(f"player{i}_id")
+        if uid:
+            players.append(uid)
 
     return players
 
 
-async def _get_player_names(game: dict) -> list[str]:
-    names = []
-
-    max_players = int(game.get("max_players") or 2)
-
-    for i in range(1, max_players + 1):
-
-        user_id = game.get(f"player{i}_id")
-
-        if not user_id:
-            names.append(f"P{i}")
-            continue
-
-        user = await db.get_user(user_id)
-
-        names.append(
-            _name_of(user, user_id)
-        )
-
-    return names
-
-
-def _render_board(game: dict, names: list[str] | None = None):
-
-    max_players = int(game.get("max_players") or 2)
-
-    positions = [
-        game.get("player1_pos", 0),
-        game.get("player2_pos", 0),
-        game.get("player3_pos", 0),
-        game.get("player4_pos", 0),
-    ]
-
-    if names is None:
-        names = ["P1", "P2", "P3", "P4"]
-
-    while len(names) < 4:
-        names.append(f"P{len(names) + 1}")
-
-    return render_board(
-        p1_pos=positions[0],
-
-        p2_pos=(
-            positions[1]
-            if max_players >= 2
-            else None
-        ),
-
-        p3_pos=(
-            positions[2]
-            if max_players >= 3
-            else None
-        ),
-
-        p4_pos=(
-            positions[3]
-            if max_players >= 4
-            else None
-        ),
-
-        p1_label=names[0],
-        p2_label=names[1],
-        p3_label=names[2],
-        p4_label=names[3],
-    )
-
-
 async def _lobby_text(game: dict) -> str:
+    players = _players_from_game(game)
 
     max_players = int(
         game.get("max_players") or 2
     )
-
-    players = _players_from_game(game)
 
     lines = [
         "🎮 <b>لابی مار و پله</b>",
@@ -145,13 +58,12 @@ async def _lobby_text(game: dict) -> str:
         "",
     ]
 
-    for index, user_id in enumerate(players, 1):
-
-        user = await db.get_user(user_id)
+    for index, uid in enumerate(players, 1):
+        user = await db.get_user(uid)
 
         name = _name_of(
             user,
-            user_id
+            uid
         )
 
         lines.append(
@@ -160,27 +72,22 @@ async def _lobby_text(game: dict) -> str:
 
     if len(players) < max_players:
 
-        lines.extend(
-            [
-                "",
-                "⏳ <b>منتظر بازیکنان دیگر...</b>",
-                "",
-                "👥 هرکس می‌تواند با زدن",
-                "«پیوستن به لابی» وارد شود.",
-            ]
-        )
+        lines.extend([
+            "",
+            "⏳ <b>منتظر بازیکنان دیگر...</b>",
+            "",
+            "👥 برای ورود روی «پیوستن به لابی» بزنید.",
+            "🎮 پس از تکمیل لابی، بازی را در ربات ادامه دهید.",
+        ])
 
     else:
 
-        lines.extend(
-            [
-                "",
-                "🔥 <b>لابی کامل شد!</b>",
-                "",
-                "🎮 برای ورود به بازی روی",
-                "«ادامه بازی در ربات» بزنید.",
-            ]
-        )
+        lines.extend([
+            "",
+            "🔥 <b>لابی کامل شد!</b>",
+            "",
+            "🎮 حالا روی «ادامه بازی در ربات» بزنید.",
+        ])
 
     return "\n".join(lines)
 
@@ -192,20 +99,20 @@ async def _lobby_text(game: dict) -> str:
 @router.callback_query(F.data == "menu:solo")
 async def cb_start_solo(
     callback: CallbackQuery,
-    bot: Bot,
+    bot: Bot
 ):
 
     user = await db.get_or_create_user(
         callback.from_user.id,
         callback.from_user.username,
-        callback.from_user.first_name,
+        callback.from_user.first_name
     )
 
     if user["is_banned"]:
 
         await callback.answer(
             "⛔️ شما مسدود شده‌اید.",
-            show_alert=True,
+            show_alert=True
         )
 
         return
@@ -219,14 +126,14 @@ async def cb_start_solo(
         await callback.answer(
             f"💸 سکه کافی نداری!\n"
             f"برای شروع {fee} سکه لازمه.",
-            show_alert=True,
+            show_alert=True
         )
 
         return
 
     await db.add_coins(
         callback.from_user.id,
-        -fee,
+        -fee
     )
 
     game_id = await db.create_game(
@@ -234,22 +141,15 @@ async def cb_start_solo(
         callback.message.chat.id,
         callback.from_user.id,
         None,
-        fee,
-    )
-
-    await db.set_game_status(
-        game_id,
-        "active",
-    )
-
-    name = _name_of(
-        user,
-        callback.from_user.id,
+        fee
     )
 
     img = render_board(
         p1_pos=0,
-        p1_label=name,
+        p1_label=_name_of(
+            user,
+            callback.from_user.id
+        )
     )
 
     caption = (
@@ -268,17 +168,17 @@ async def cb_start_solo(
         callback.message.chat.id,
         BufferedInputFile(
             img,
-            filename="board.png",
+            filename="board.png"
         ),
         caption=caption,
         reply_markup=kb.solo_roll_keyboard(
             game_id
-        ),
+        )
     )
 
     await db.update_game_message(
         game_id,
-        sent.message_id,
+        sent.message_id
     )
 
     await callback.answer()
@@ -289,7 +189,7 @@ async def cb_start_solo(
 )
 async def cb_solo_roll(
     callback: CallbackQuery,
-    bot: Bot,
+    bot: Bot
 ):
 
     try:
@@ -300,7 +200,7 @@ async def cb_solo_roll(
 
         await callback.answer(
             "❌ بازی نامعتبر است.",
-            show_alert=True,
+            show_alert=True
         )
 
         return
@@ -313,7 +213,7 @@ async def cb_solo_roll(
 
         await callback.answer(
             "❌ این بازی دیگر فعال نیست.",
-            show_alert=True,
+            show_alert=True
         )
 
         return
@@ -322,7 +222,7 @@ async def cb_solo_roll(
 
         await callback.answer(
             "❌ این بازی برای تو نیست.",
-            show_alert=True,
+            show_alert=True
         )
 
         return
@@ -331,13 +231,13 @@ async def cb_solo_roll(
 
     result = apply_move(
         game["player1_pos"],
-        dice,
+        dice
     )
 
     await db.update_game_position(
         game_id,
         1,
-        result["final_to"],
+        result["final_to"]
     )
 
     user = await db.get_user(
@@ -346,13 +246,15 @@ async def cb_solo_roll(
 
     name = _name_of(
         user,
-        callback.from_user.id,
+        callback.from_user.id
     )
+
+    event_text = ""
 
     if result["event"] == "overshoot":
 
         event_text = (
-            "🚫 از خانه ۱۰۰ رد می‌شدی؛ "
+            "🚫 از خانه ۱۰۰ رد شد؛ "
             "حرکت انجام نشد."
         )
 
@@ -370,10 +272,6 @@ async def cb_solo_roll(
             f"{result['final_to']}."
         )
 
-    else:
-
-        event_text = ""
-
     if result["won"]:
 
         reward = await db.get_setting(
@@ -382,22 +280,22 @@ async def cb_solo_roll(
 
         await db.add_coins(
             callback.from_user.id,
-            reward,
+            reward
         )
 
         await db.increment_stats(
             callback.from_user.id,
-            won=True,
+            won=True
         )
 
         await db.finish_game(
             game_id,
-            winner_id=callback.from_user.id,
+            winner_id=callback.from_user.id
         )
 
         img = render_board(
             p1_pos=100,
-            p1_label=name,
+            p1_label=name
         )
 
         caption = (
@@ -411,14 +309,14 @@ async def cb_solo_roll(
             media=InputMediaPhoto(
                 media=BufferedInputFile(
                     img,
-                    filename="board.png",
+                    filename="board.png"
                 ),
                 caption=caption,
-                parse_mode="HTML",
+                parse_mode="HTML"
             ),
             chat_id=callback.message.chat.id,
             message_id=callback.message.message_id,
-            reply_markup=kb.solo_finished_keyboard(),
+            reply_markup=kb.solo_finished_keyboard()
         )
 
         await callback.answer(
@@ -427,36 +325,32 @@ async def cb_solo_roll(
 
         return
 
-    game = await db.get_game(
-        game_id
-    )
-
     img = render_board(
-        p1_pos=game["player1_pos"],
-        p1_label=name,
+        p1_pos=result["final_to"],
+        p1_label=name
     )
 
     caption = (
         f"🎮 <b>بازی تکی</b>\n\n"
         f"🎲 تاس: {dice}\n"
         f"{event_text}\n"
-        f"📍 خانه فعلی: {game['player1_pos']}"
+        f"📍 خانه فعلی: {result['final_to']}"
     )
 
     await bot.edit_message_media(
         media=InputMediaPhoto(
             media=BufferedInputFile(
                 img,
-                filename="board.png",
+                filename="board.png"
             ),
             caption=caption,
-            parse_mode="HTML",
+            parse_mode="HTML"
         ),
         chat_id=callback.message.chat.id,
         message_id=callback.message.message_id,
         reply_markup=kb.solo_roll_keyboard(
             game_id
-        ),
+        )
     )
 
     await callback.answer()
@@ -466,7 +360,7 @@ async def cb_solo_roll(
     F.data.startswith("solo:cancel:")
 )
 async def cb_solo_cancel(
-    callback: CallbackQuery,
+    callback: CallbackQuery
 ):
 
     try:
@@ -474,7 +368,6 @@ async def cb_solo_cancel(
             callback.data.split(":")[2]
         )
     except Exception:
-
         await callback.answer()
         return
 
@@ -483,7 +376,6 @@ async def cb_solo_cancel(
     )
 
     if not game or game["status"] != "active":
-
         await callback.answer()
         return
 
@@ -491,7 +383,7 @@ async def cb_solo_cancel(
 
         await callback.answer(
             "❌ این بازی برای تو نیست.",
-            show_alert=True,
+            show_alert=True
         )
 
         return
@@ -499,14 +391,14 @@ async def cb_solo_cancel(
     await db.finish_game(
         game_id,
         winner_id=None,
-        status="cancelled",
+        status="cancelled"
     )
 
     try:
 
         await callback.message.edit_caption(
             caption="❌ بازی لغو شد.",
-            reply_markup=kb.solo_finished_keyboard(),
+            reply_markup=kb.solo_finished_keyboard()
         )
 
     except Exception:
@@ -525,7 +417,7 @@ async def cb_solo_cancel(
     F.data == "menu:pvp"
 )
 async def cb_pvp_intro(
-    callback: CallbackQuery,
+    callback: CallbackQuery
 ):
 
     stake = await db.get_setting(
@@ -543,7 +435,7 @@ async def cb_pvp_intro(
 
     await callback.message.edit_text(
         text,
-        reply_markup=kb.pvp_mode_keyboard(),
+        reply_markup=kb.pvp_mode_keyboard()
     )
 
     await callback.answer()
@@ -558,7 +450,7 @@ async def cb_pvp_intro(
 )
 async def cb_create_lobby(
     callback: CallbackQuery,
-    bot: Bot,
+    bot: Bot
 ):
 
     try:
@@ -571,7 +463,7 @@ async def cb_create_lobby(
 
         await callback.answer(
             "❌ ظرفیت لابی نامعتبر است.",
-            show_alert=True,
+            show_alert=True
         )
 
         return
@@ -580,7 +472,7 @@ async def cb_create_lobby(
 
         await callback.answer(
             "❌ فقط لابی ۲ نفره یا ۴ نفره مجاز است.",
-            show_alert=True,
+            show_alert=True
         )
 
         return
@@ -588,14 +480,14 @@ async def cb_create_lobby(
     user = await db.get_or_create_user(
         callback.from_user.id,
         callback.from_user.username,
-        callback.from_user.first_name,
+        callback.from_user.first_name
     )
 
     if user["is_banned"]:
 
         await callback.answer(
             "⛔️ شما مسدود شده‌اید.",
-            show_alert=True,
+            show_alert=True
         )
 
         return
@@ -607,30 +499,26 @@ async def cb_create_lobby(
     if user["coins"] < stake:
 
         await callback.answer(
-            f"💸 برای ساخت این لابی "
-            f"{stake} سکه لازم داری.",
-            show_alert=True,
+            f"💸 برای ساخت لابی {stake} سکه لازم داری.",
+            show_alert=True
         )
 
         return
 
-    # --------------------------------------------------------
     # ساخت لابی
-    # --------------------------------------------------------
-
     game_id = await db.create_game(
         "pvp",
         callback.message.chat.id,
         callback.from_user.id,
         None,
         stake,
-        max_players=max_players,
+        max_players=max_players
     )
 
-    # حتماً pending
+    # لابی در حالت انتظار
     await db.set_game_status(
         game_id,
-        "pending",
+        "pending"
     )
 
     game = await db.get_game(
@@ -648,35 +536,31 @@ async def cb_create_lobby(
     keyboard = kb.pvp_lobby_keyboard(
         game_id,
         username,
-        max_players,
+        max_players
     )
 
     try:
 
         await callback.message.edit_text(
             text,
-            reply_markup=keyboard,
+            reply_markup=keyboard
         )
 
         await db.update_game_message(
             game_id,
-            callback.message.message_id,
+            callback.message.message_id
         )
 
-    except Exception as e:
-
-        logger.exception(
-            "Could not edit lobby message"
-        )
+    except Exception:
 
         sent = await callback.message.answer(
             text,
-            reply_markup=keyboard,
+            reply_markup=keyboard
         )
 
         await db.update_game_message(
             game_id,
-            sent.message_id,
+            sent.message_id
         )
 
     await callback.answer(
@@ -693,12 +577,8 @@ async def cb_create_lobby(
 )
 async def cb_join_lobby(
     callback: CallbackQuery,
-    bot: Bot,
+    bot: Bot
 ):
-
-    # --------------------------------------------------------
-    # استخراج ID
-    # --------------------------------------------------------
 
     try:
 
@@ -710,14 +590,10 @@ async def cb_join_lobby(
 
         await callback.answer(
             "❌ شناسه لابی نامعتبر است.",
-            show_alert=True,
+            show_alert=True
         )
 
         return
-
-    # --------------------------------------------------------
-    # دریافت لابی
-    # --------------------------------------------------------
 
     game = await db.get_game(
         game_id
@@ -727,7 +603,7 @@ async def cb_join_lobby(
 
         await callback.answer(
             "❌ این لابی پیدا نشد.",
-            show_alert=True,
+            show_alert=True
         )
 
         return
@@ -736,95 +612,77 @@ async def cb_join_lobby(
 
         await callback.answer(
             "❌ این لابی دیگر فعال نیست.",
-            show_alert=True,
+            show_alert=True
         )
 
         return
 
-    # --------------------------------------------------------
-    # ثبت کاربر
-    # --------------------------------------------------------
-
     user = await db.get_or_create_user(
         callback.from_user.id,
         callback.from_user.username,
-        callback.from_user.first_name,
+        callback.from_user.first_name
     )
 
     if user["is_banned"]:
 
         await callback.answer(
             "⛔️ شما مسدود شده‌اید.",
-            show_alert=True,
+            show_alert=True
         )
 
         return
 
-    # --------------------------------------------------------
-    # آیا کاربر قبلاً داخل لابی است؟
-    # --------------------------------------------------------
-
-    players_before = _players_from_game(
+    # اگر خودش قبلاً داخل لابی است
+    existing_players = _players_from_game(
         game
     )
 
-    if callback.from_user.id in players_before:
+    if callback.from_user.id in existing_players:
 
         await callback.answer(
-            "✅ تو قبلاً داخل این لابی هستی.",
-            show_alert=True,
+            "✅ شما قبلاً داخل این لابی هستید.",
+            show_alert=True
         )
 
         return
-
-    # --------------------------------------------------------
-    # بررسی سکه
-    # --------------------------------------------------------
 
     if user["coins"] < game["stake"]:
 
         await callback.answer(
-            f"💸 برای ورود به این لابی "
-            f"{game['stake']} سکه لازم داری.",
-            show_alert=True,
+            f"💸 برای ورود {game['stake']} سکه لازم داری.",
+            show_alert=True
         )
 
         return
 
-    # --------------------------------------------------------
-    # اضافه کردن بازیکن
-    # --------------------------------------------------------
-
+    # اضافه شدن به اولین جای خالی
     ok, reason = await db.add_player_to_lobby(
         game_id,
-        callback.from_user.id,
+        callback.from_user.id
     )
 
     if not ok:
 
         if reason == "full":
-            message = "❌ لابی پر شده است."
+            msg = "❌ لابی پر شده است."
 
         elif reason == "closed":
-            message = "❌ این لابی بسته شده است."
+            msg = "❌ لابی بسته شده است."
 
         elif reason == "not_found":
-            message = "❌ لابی پیدا نشد."
+            msg = "❌ لابی پیدا نشد."
 
         else:
-            message = "❌ ورود به لابی ناموفق بود."
+            msg = "❌ ورود به لابی ناموفق بود."
 
         await callback.answer(
-            message,
-            show_alert=True,
+            msg,
+            show_alert=True
         )
 
         return
 
-    # --------------------------------------------------------
-    # دریافت وضعیت جدید
-    # --------------------------------------------------------
-
+    # وضعیت جدید
     game = await db.get_game(
         game_id
     )
@@ -837,86 +695,79 @@ async def cb_join_lobby(
         game["max_players"]
     )
 
-    # --------------------------------------------------------
-    # اگر لابی کامل شده
-    # --------------------------------------------------------
+    # ========================================================
+    # LOBBY COMPLETE
+    # ========================================================
 
     if len(players) >= max_players:
 
-        # بررسی موجودی همه
-        balance_ok = True
+        # بررسی موجودی همه بازیکنان
+        balances_ok = True
 
-        for player_id in players:
+        for uid in players:
 
             player = await db.get_user(
-                player_id
+                uid
             )
 
-            if not player:
+            if not player or player["coins"] < game["stake"]:
 
-                balance_ok = False
+                balances_ok = False
                 break
 
-            if player["coins"] < game["stake"]:
+        if not balances_ok:
 
-                balance_ok = False
-                break
-
-        if not balance_ok:
+            # بازیکن وارد لابی شده ولی بازی
+            # تا زمانی که موجودی کافی نباشد شروع نمی‌شود.
 
             await callback.answer(
                 "❌ یکی از بازیکنان سکه کافی ندارد.",
-                show_alert=True,
+                show_alert=True
             )
 
-            return
+        else:
 
-        # ----------------------------------------------------
-        # دریافت شرط از همه
-        # ----------------------------------------------------
+            # دریافت شرط از همه
+            for uid in players:
 
-        for player_id in players:
+                await db.add_coins(
+                    uid,
+                    -game["stake"]
+                )
 
-            await db.add_coins(
-                player_id,
-                -game["stake"],
+            # شروع بازی
+            await db.set_game_status(
+                game_id,
+                "active"
             )
 
-        # ----------------------------------------------------
-        # شروع بازی
-        # ----------------------------------------------------
+            await db.set_turn(
+                game_id,
+                1
+            )
 
-        await db.set_turn(
-            game_id,
-            1,
-        )
-
-        await db.set_game_status(
-            game_id,
-            "active",
-        )
-
-        game = await db.get_game(
-            game_id
-        )
-
-    # --------------------------------------------------------
-    # آپدیت پیام لابی
-    # --------------------------------------------------------
-
-    text = await _lobby_text(
-        game
+    # دریافت وضعیت نهایی
+    game = await db.get_game(
+        game_id
     )
 
     username = await _bot_username(
         bot
     )
 
+    text = await _lobby_text(
+        game
+    )
+
     keyboard = kb.pvp_lobby_keyboard(
         game_id,
         username,
-        max_players,
+        max_players
     )
+
+    # ========================================================
+    # UPDATE GROUP MESSAGE
+    # ========================================================
 
     try:
 
@@ -924,32 +775,37 @@ async def cb_join_lobby(
             text,
             chat_id=game["chat_id"],
             message_id=game["message_id"],
-            reply_markup=keyboard,
+            reply_markup=keyboard
         )
 
-    except Exception as e:
+    except Exception:
 
-        logger.warning(
-            "Could not update lobby message: %s",
-            e,
-        )
+        try:
 
-    # --------------------------------------------------------
-    # نتیجه
-    # --------------------------------------------------------
+            await callback.message.edit_text(
+                text,
+                reply_markup=keyboard
+            )
+
+        except Exception:
+            pass
+
+    # ========================================================
+    # RESULT
+    # ========================================================
 
     if game["status"] == "active":
 
         await callback.answer(
-            "🔥 لابی کامل شد! حالا «ادامه بازی در ربات» را بزن.",
-            show_alert=True,
+            "🔥 لابی کامل شد! حالا روی «ادامه بازی در ربات» بزن.",
+            show_alert=True
         )
 
     else:
 
         await callback.answer(
             "✅ با موفقیت وارد لابی شدی!",
-            show_alert=True,
+            show_alert=True
         )
 
 
@@ -961,7 +817,7 @@ async def cb_join_lobby(
     F.data.startswith("lobby:cancel:")
 )
 async def cb_cancel_lobby(
-    callback: CallbackQuery,
+    callback: CallbackQuery
 ):
 
     try:
@@ -988,7 +844,7 @@ async def cb_cancel_lobby(
 
         await callback.answer(
             "این لابی دیگر فعال نیست.",
-            show_alert=True,
+            show_alert=True
         )
 
         return
@@ -997,7 +853,7 @@ async def cb_cancel_lobby(
 
         await callback.answer(
             "❌ فقط سازنده لابی می‌تواند آن را لغو کند.",
-            show_alert=True,
+            show_alert=True
         )
 
         return
@@ -1005,7 +861,7 @@ async def cb_cancel_lobby(
     await db.finish_game(
         game_id,
         winner_id=None,
-        status="cancelled",
+        status="cancelled"
     )
 
     try:
@@ -1023,33 +879,30 @@ async def cb_cancel_lobby(
 
 
 # ============================================================
-# OPEN GAME IN PRIVATE BOT
+# PRIVATE GAME
 # ============================================================
 
 async def _send_private_game_view(
     bot: Bot,
     game: dict,
-    user_id: int,
+    user_id: int
 ):
 
     slot = await db.get_player_slot(
         game,
-        user_id,
+        user_id
     )
 
     if not slot:
 
         await bot.send_message(
             user_id,
-            "❌ تو بازیکن این لابی نیستی."
+            "❌ شما بازیکن این لابی نیستید."
         )
 
         return False
 
-    # --------------------------------------------------------
     # هنوز کامل نشده
-    # --------------------------------------------------------
-
     if game["status"] == "pending":
 
         players = _players_from_game(
@@ -1069,10 +922,6 @@ async def _send_private_game_view(
 
         return True
 
-    # --------------------------------------------------------
-    # بازی فعال نیست
-    # --------------------------------------------------------
-
     if game["status"] != "active":
 
         await bot.send_message(
@@ -1082,85 +931,100 @@ async def _send_private_game_view(
 
         return True
 
-    # --------------------------------------------------------
-    # بازیکنان
-    # --------------------------------------------------------
+    max_players = int(
+        game["max_players"]
+    )
 
     players = _players_from_game(
         game
     )
 
-    names = await _get_player_names(
-        game
-    )
+    names = []
 
-    # --------------------------------------------------------
-    # تصویر
-    # --------------------------------------------------------
+    positions = []
 
-    img = _render_board(
-        game,
-        names,
+    for i in range(1, max_players + 1):
+
+        uid = game[
+            f"player{i}_id"
+        ]
+
+        user = await db.get_user(
+            uid
+        )
+
+        names.append(
+            _name_of(
+                user,
+                uid
+            )
+        )
+
+        positions.append(
+            game[
+                f"player{i}_pos"
+            ]
+        )
+
+    # ساخت صفحه بازی
+    img = render_board(
+        p1_pos=positions[0],
+        p2_pos=positions[1] if max_players >= 2 else None,
+        p3_pos=positions[2] if max_players >= 3 else None,
+        p4_pos=positions[3] if max_players >= 4 else None,
+
+        p1_label=names[0],
+        p2_label=names[1] if max_players >= 2 else "P2",
+        p3_label=names[2] if max_players >= 3 else "P3",
+        p4_label=names[3] if max_players >= 4 else "P4",
     )
 
     turn = int(
         game.get("turn") or 1
     )
 
-    if 1 <= turn <= len(names):
-
-        turn_name = names[
-            turn - 1
-        ]
-
-    else:
-
-        turn_name = "بازیکن"
-
-    my_position = game.get(
-        f"player{slot}_pos",
-        0,
+    turn_name = (
+        names[turn - 1]
+        if 1 <= turn <= len(names)
+        else "بازیکن"
     )
+
+    my_position = game[
+        f"player{slot}_pos"
+    ]
 
     caption = (
-        f"🐍🪜 <b>مار و پله "
-        f"{game['max_players']} نفره</b>\n\n"
-        f"👥 بازیکنان: "
-        f"{len(players)}/{game['max_players']}\n"
-        f"💰 شرط هر نفر: "
-        f"{game['stake']} سکه\n\n"
+        f"🐍🪜 <b>مار و پله {max_players} نفره</b>\n\n"
+        f"👥 بازیکنان: {len(players)}/{max_players}\n"
+        f"💰 شرط هر نفر: {game['stake']} سکه\n\n"
         f"🎯 نوبت: <b>{turn_name}</b>\n"
-        f"📍 موقعیت تو: "
-        f"خانه {my_position}"
+        f"📍 موقعیت تو: خانه {my_position}"
     )
-
-    # --------------------------------------------------------
-    # ارسال بازی
-    # --------------------------------------------------------
 
     sent = await bot.send_photo(
         user_id,
         BufferedInputFile(
             img,
-            filename="board.png",
+            filename="board.png"
         ),
         caption=caption,
         reply_markup=kb.private_game_keyboard(
             game["game_id"]
-        ),
+        )
     )
 
     await db.update_player_message(
         game["game_id"],
         slot,
-        sent.message_id,
+        sent.message_id
     )
 
     return True
 
 
 # ============================================================
-# TELEGRAM /start game_ID
+# OPEN GAME FROM BOT
+# /start game_ID
 # ============================================================
 
 @router.message(
@@ -1168,7 +1032,7 @@ async def _send_private_game_view(
 )
 async def cmd_game_start(
     message: Message,
-    bot: Bot,
+    bot: Bot
 ):
 
     text = message.text or ""
@@ -1178,13 +1042,11 @@ async def cmd_game_start(
     )
 
     if len(parts) < 2:
-
         return
 
     payload = parts[1].strip()
 
     if not payload.startswith("game_"):
-
         return
 
     try:
@@ -1222,7 +1084,7 @@ async def cmd_game_start(
     if user_id not in players:
 
         await message.answer(
-            "❌ این لینک برای بازیکنان همین لابی است."
+            "❌ این لینک فقط برای بازیکنان همین لابی است."
         )
 
         return
@@ -1230,13 +1092,13 @@ async def cmd_game_start(
     await db.get_or_create_user(
         user_id,
         message.from_user.username,
-        message.from_user.first_name,
+        message.from_user.first_name
     )
 
     await _send_private_game_view(
         bot,
         game,
-        user_id,
+        user_id
     )
 
 
@@ -1249,7 +1111,7 @@ async def cmd_game_start(
 )
 async def cb_pvp_roll(
     callback: CallbackQuery,
-    bot: Bot,
+    bot: Bot
 ):
 
     try:
@@ -1262,7 +1124,7 @@ async def cb_pvp_roll(
 
         await callback.answer(
             "❌ بازی نامعتبر است.",
-            show_alert=True,
+            show_alert=True
         )
 
         return
@@ -1275,21 +1137,21 @@ async def cb_pvp_roll(
 
         await callback.answer(
             "❌ این بازی دیگر فعال نیست.",
-            show_alert=True,
+            show_alert=True
         )
 
         return
 
     slot = await db.get_player_slot(
         game,
-        callback.from_user.id,
+        callback.from_user.id
     )
 
     if not slot:
 
         await callback.answer(
-            "❌ تو در این بازی نیستی.",
-            show_alert=True,
+            "❌ شما در این بازی نیستید.",
+            show_alert=True
         )
 
         return
@@ -1297,19 +1159,34 @@ async def cb_pvp_roll(
     if int(game["turn"]) != slot:
 
         await callback.answer(
-            "⏳ هنوز نوبت تو نیست!",
-            show_alert=True,
+            "⏳ هنوز نوبت شما نیست!",
+            show_alert=True
         )
 
         return
+
+    max_players = int(
+        game["max_players"]
+    )
 
     players = _players_from_game(
         game
     )
 
-    names = await _get_player_names(
-        game
-    )
+    names = []
+
+    for uid in players:
+
+        user = await db.get_user(
+            uid
+        )
+
+        names.append(
+            _name_of(
+                user,
+                uid
+            )
+        )
 
     current_player_id = game[
         f"player{slot}_id"
@@ -1323,54 +1200,67 @@ async def cb_pvp_roll(
 
     result = apply_move(
         current_position,
-        dice,
+        dice
     )
 
     await db.update_game_position(
         game_id,
         slot,
-        result["final_to"],
+        result["final_to"]
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # WIN
-    # --------------------------------------------------------
+    # ========================================================
 
     if result["won"]:
 
         pot = (
             game["stake"]
-            * game["max_players"]
+            * max_players
         )
 
         await db.add_coins(
             current_player_id,
-            pot,
+            pot
         )
 
-        for player_id in players:
+        for uid in players:
 
             await db.increment_stats(
-                player_id,
-                won=(
-                    player_id ==
-                    current_player_id
-                ),
+                uid,
+                won=(uid == current_player_id)
             )
 
         await db.finish_game(
             game_id,
-            winner_id=current_player_id,
-            status="finished",
+            winner_id=current_player_id
         )
 
         game = await db.get_game(
             game_id
         )
 
-        img = _render_board(
-            game,
-            names,
+        positions = []
+
+        for i in range(1, max_players + 1):
+
+            positions.append(
+                game[
+                    f"player{i}_pos"
+                ]
+            )
+
+        img = render_board(
+            p1_pos=positions[0],
+            p2_pos=positions[1] if max_players >= 2 else None,
+            p3_pos=positions[2] if max_players >= 3 else None,
+            p4_pos=positions[3] if max_players >= 4 else None,
+
+            p1_label=names[0],
+            p2_label=names[1] if max_players >= 2 else "P2",
+            p3_label=names[2] if max_players >= 3 else "P3",
+            p4_label=names[3] if max_players >= 4 else "P4",
         )
 
         winner_name = names[
@@ -1380,13 +1270,13 @@ async def cb_pvp_roll(
         caption = (
             f"🏆 <b>{winner_name} برنده شد!</b>\n\n"
             f"🎲 تاس: {dice}\n"
-            f"🏁 به خانه ۱۰۰ رسید!\n"
+            "🏁 به خانه ۱۰۰ رسید!\n"
             f"💰 جایزه: {pot} سکه"
         )
 
-        for index, player_id in enumerate(
+        for index, uid in enumerate(
             players,
-            1,
+            1
         ):
 
             message_id = game.get(
@@ -1402,22 +1292,18 @@ async def cb_pvp_roll(
                     media=InputMediaPhoto(
                         media=BufferedInputFile(
                             img,
-                            filename="board.png",
+                            filename="board.png"
                         ),
                         caption=caption,
-                        parse_mode="HTML",
+                        parse_mode="HTML"
                     ),
-                    chat_id=player_id,
+                    chat_id=uid,
                     message_id=message_id,
-                    reply_markup=kb.pvp_finished_keyboard(),
+                    reply_markup=kb.pvp_finished_keyboard()
                 )
 
-            except Exception as e:
-
-                logger.warning(
-                    "Could not update winner message: %s",
-                    e,
-                )
+            except Exception:
+                pass
 
         await callback.answer(
             "🏆 بردی!"
@@ -1425,9 +1311,11 @@ async def cb_pvp_roll(
 
         return
 
-    # --------------------------------------------------------
+    # ========================================================
     # EVENT
-    # --------------------------------------------------------
+    # ========================================================
+
+    event_text = ""
 
     if result["event"] == "overshoot":
 
@@ -1450,61 +1338,57 @@ async def cb_pvp_roll(
             f"{result['final_to']}."
         )
 
-    else:
-
-        event_text = ""
-
-    # --------------------------------------------------------
+    # ========================================================
     # NEXT TURN
-    # --------------------------------------------------------
-
-    max_players = int(
-        game["max_players"]
-    )
+    # ========================================================
 
     next_turn = (
-        (slot % max_players) + 1
-    )
+        slot % max_players
+    ) + 1
 
     await db.set_turn(
         game_id,
-        next_turn,
+        next_turn
     )
 
     game = await db.get_game(
         game_id
     )
 
-    img = _render_board(
-        game,
-        names,
+    positions = []
+
+    for i in range(1, max_players + 1):
+
+        positions.append(
+            game[
+                f"player{i}_pos"
+            ]
+        )
+
+    img = render_board(
+        p1_pos=positions[0],
+        p2_pos=positions[1] if max_players >= 2 else None,
+        p3_pos=positions[2] if max_players >= 3 else None,
+        p4_pos=positions[3] if max_players >= 4 else None,
+
+        p1_label=names[0],
+        p2_label=names[1] if max_players >= 2 else "P2",
+        p3_label=names[2] if max_players >= 3 else "P3",
+        p4_label=names[3] if max_players >= 4 else "P4",
     )
-
-    next_player_name = names[
-        next_turn - 1
-    ]
-
-    current_name = names[
-        slot - 1
-    ]
 
     caption = (
-        f"⚔️ <b>مار و پله "
-        f"{max_players} نفره</b>\n\n"
-        f"🎲 {current_name} "
+        f"⚔️ <b>مار و پله {max_players} نفره</b>\n\n"
+        f"🎲 {names[slot - 1]} "
         f"تاس انداخت: <b>{dice}</b>\n"
         f"{event_text}\n\n"
-        f"🎯 نوبت: "
-        f"<b>{next_player_name}</b>"
+        f"🎯 نوبت: <b>{names[next_turn - 1]}</b>"
     )
 
-    # --------------------------------------------------------
-    # بروزرسانی همه بازیکنان
-    # --------------------------------------------------------
-
-    for index, player_id in enumerate(
+    # بروزرسانی بازی برای همه
+    for index, uid in enumerate(
         players,
-        1,
+        1
     ):
 
         message_id = game.get(
@@ -1520,31 +1404,26 @@ async def cb_pvp_roll(
                 media=InputMediaPhoto(
                     media=BufferedInputFile(
                         img,
-                        filename="board.png",
+                        filename="board.png"
                     ),
                     caption=caption,
-                    parse_mode="HTML",
+                    parse_mode="HTML"
                 ),
-                chat_id=player_id,
+                chat_id=uid,
                 message_id=message_id,
                 reply_markup=kb.private_game_keyboard(
                     game_id
-                ),
+                )
             )
 
-        except Exception as e:
-
-            logger.warning(
-                "Could not update player %s: %s",
-                player_id,
-                e,
-            )
+        except Exception:
+            pass
 
     await callback.answer()
 
 
 # ============================================================
-# LEAVE PVP
+# LEAVE GAME
 # ============================================================
 
 @router.callback_query(
@@ -1552,7 +1431,7 @@ async def cb_pvp_roll(
 )
 async def cb_pvp_leave(
     callback: CallbackQuery,
-    bot: Bot,
+    bot: Bot
 ):
 
     try:
@@ -1577,14 +1456,14 @@ async def cb_pvp_leave(
 
     slot = await db.get_player_slot(
         game,
-        callback.from_user.id,
+        callback.from_user.id
     )
 
     if not slot:
 
         await callback.answer(
-            "تو در این بازی نیستی.",
-            show_alert=True,
+            "❌ شما در این بازی نیستید.",
+            show_alert=True
         )
 
         return
@@ -1596,19 +1475,19 @@ async def cb_pvp_leave(
     await db.finish_game(
         game_id,
         winner_id=None,
-        status="cancelled",
+        status="cancelled"
     )
 
-    for player_id in players:
+    for uid in players:
 
-        if player_id == callback.from_user.id:
+        if uid == callback.from_user.id:
             continue
 
         try:
 
             await bot.send_message(
-                player_id,
-                "❌ بازی به دلیل خروج یکی از بازیکنان لغو شد.",
+                uid,
+                "❌ بازی به دلیل خروج یکی از بازیکنان لغو شد."
             )
 
         except Exception:
@@ -1618,7 +1497,7 @@ async def cb_pvp_leave(
 
         await callback.message.edit_caption(
             caption="❌ از بازی خارج شدی؛ بازی لغو شد.",
-            reply_markup=kb.pvp_finished_keyboard(),
+            reply_markup=kb.pvp_finished_keyboard()
         )
 
     except Exception:
@@ -1626,4 +1505,4 @@ async def cb_pvp_leave(
 
     await callback.answer(
         "از بازی خارج شدی."
-                         )
+        )
