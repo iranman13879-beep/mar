@@ -271,4 +271,14 @@ async def finish_game(game_id: int, winner_id: int | None, status: str = "finish
             "UPDATE games SET status = ?, winner_id = ? WHERE game_id = ?",
             (status, winner_id, game_id),
         )
+ 
         await db.commit()
+        async def get_game_by_message(chat_id: int, message_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT * FROM games WHERE chat_id = ? AND message_id = ? "
+            "ORDER BY game_id DESC LIMIT 1",
+            (chat_id, message_id),
+        )
+        row = await cur.fetchone()
+        return _game_row_to_dict(row) if row else None
