@@ -1,13 +1,6 @@
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
-from aiogram.types import (
-    CallbackQuery,
-    Message,
-    BufferedInputFile,
-    InputMediaPhoto,
-    MessageReactionUpdated,
-    ReactionTypeEmoji,
-)
+from aiogram.types import CallbackQuery, Message, BufferedInputFile, InputMediaPhoto
 
 import database as db
 import keyboards as kb
@@ -15,8 +8,6 @@ from board_image import render_board
 from game_logic import roll_dice, apply_move
 
 router = Router(name="game")
-
-DICE_EMOJI = "🎲"
 
 
 def _name_of(user_row: dict | None, fallback_id: int) -> str:
@@ -56,7 +47,7 @@ async def cb_start_solo(callback: CallbackQuery, bot: Bot):
         f"🎮 <b>بازی تکی شروع شد!</b>\n"
         f"هزینه ورود: {fee} سکه\n"
         f"موقعیت: خانه 0\n\n"
-        f"🎲 دکمه رو بزن یا روی این پیام ری‌اکشن 🎲 بزن تا تاس بندازی."
+        f"🎲 دکمه رو بزن یا خودت ایموجی 🎲 رو به‌عنوان پیام بفرست تا تاس بندازی."
     )
     try:
         await callback.message.delete()
@@ -72,9 +63,8 @@ async def cb_start_solo(callback: CallbackQuery, bot: Bot):
     await callback.answer()
 
 
-async def _perform_solo_roll(bot: Bot, game: dict, chat_id: int, message_id: int) -> dict:
+async def _perform_solo_roll(bot: Bot, game: dict, chat_id: int, message_id: int, dice: int) -> dict:
     game_id = game["game_id"]
-    dice = roll_dice()
     result = apply_move(game["player1_pos"], dice)
     await db.update_game_position(game_id, 1, result["final_to"])
 
@@ -138,7 +128,8 @@ async def cb_solo_roll(callback: CallbackQuery, bot: Bot):
         await callback.answer("این بازیِ تو نیست 😅", show_alert=True)
         return
 
-    result = await _perform_solo_roll(bot, game, callback.message.chat.id, callback.message.message_id)
+    dice = roll_dice()
+    result = await _perform_solo_roll(bot, game, callback.message.chat.id, callback.message.message_id, dice)
     await callback.answer("🏆 بردی!" if result["won"] else None)
 
 
@@ -329,7 +320,7 @@ async def cb_pvp_decline(callback: CallbackQuery):
     await callback.answer()
 
 
-async def _perform_pvp_roll(bot: Bot, game: dict, chat_id: int, message_id: int) -> dict:
+async def _perform_pvp_roll(bot: Bot, game: dict, chat_id: int, message_id: int, dice: int) -> dict:
     game_id = game["game_id"]
     is_p1_turn = game["turn"] == 1
     current_player_id = game["player1_id"] if is_p1_turn else game["player2_id"]
@@ -339,7 +330,6 @@ async def _perform_pvp_roll(bot: Bot, game: dict, chat_id: int, message_id: int)
     p1_name = _name_of(p1, game["player1_id"])
     p2_name = _name_of(p2, game["player2_id"])
 
-    dice = roll_dice()
     current_pos = game["player1_pos"] if is_p1_turn else game["player2_pos"]
     result = apply_move(current_pos, dice)
     await db.update_game_position(game_id, 1 if is_p1_turn else 2, result["final_to"])
@@ -416,38 +406,33 @@ async def cb_pvp_roll(callback: CallbackQuery, bot: Bot):
         await callback.answer("صبر کن، نوبت توئه نیست! ⏳", show_alert=True)
         return
 
-    result = await _perform_pvp_roll(bot, game, callback.message.chat.id, callback.message.message_id)
+    dice = roll_dice()
+    result = await _perform_pvp_roll(bot, game, callback.message.chat.id, callback.message.message_id, dice)
     await callback.answer("🏆 بردی!" if result["won"] else None)
 
 
 # ============================================================
-#                 REACTION-BASED DICE ROLL (🎲)
+#            NATIVE 🎲 DICE MESSAGE (کاربر خودش می‌فرسته)
 # ============================================================
 
-@router.message_reaction()
-async def on_dice_reaction(reaction: MessageReactionUpdated, bot: Bot):
-    new_emojis = {
-        r.emoji for r in reaction.new_reaction
-        if isinstance(r, ReactionTypeEmoji)
-    }
-    if DICE_EMOJI not in new_emojis:
-        return
-    if reaction.user is None:
+@router.message(F.dice)
+async def on_native_dice(message: Message, bot: Bot):
+    if message.dice.emoji != "🎲":
         return
 
-    game = await db.get_game_by_message(reaction.chat.id, reaction.message_id)
-    if not game or game["status"] != "active":
+    game = await db.get_active_game_for_player(message.chat.id, message.from_user.id)
+    if not game or not game.get("message_id"):
         return
 
-    user_id = reaction.user.id
+    dice_value = message.dice.value  # عدد واقعی که خود تلگرام تولید کرده (۱ تا ۶)
 
     if game["game_type"] == "solo":
-        if user_id != game["player1_id"]:
+        if message.from_user.id != game["player1_id"]:
             return
-        await _perform_solo_roll(bot, game, reaction.chat.id, reaction.message_id)
+        await _perform_solo_roll(bot, game, message.chat.id, game["message_id"], dice_value)
     else:
         is_p1_turn = game["turn"] == 1
         current_player_id = game["player1_id"] if is_p1_turn else game["player2_id"]
-        if user_id != current_player_id:
+        if message.from_user.id != current_player_id:
             return
-        await _perform_pvp_roll(bot, game, reaction.chat.id, reaction.message_id)
+        await _perform_pvp_roll(bot, game, message.chat.id, game["message_id"], dice_value)
