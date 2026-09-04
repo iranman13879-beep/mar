@@ -244,6 +244,18 @@ async def get_game_by_message(chat_id: int, message_id: int) -> dict | None:
         return _game_row_to_dict(row) if row else None
 
 
+async def get_active_game_for_player(chat_id: int, user_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT * FROM games WHERE chat_id = ? AND status = 'active' "
+            "AND (player1_id = ? OR player2_id = ?) "
+            "ORDER BY game_id DESC LIMIT 1",
+            (chat_id, user_id, user_id),
+        )
+        row = await cur.fetchone()
+        return _game_row_to_dict(row) if row else None
+
+
 def _game_row_to_dict(row) -> dict:
     keys = [
         "game_id", "game_type", "chat_id", "message_id", "player1_id", "player2_id",
