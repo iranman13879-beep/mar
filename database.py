@@ -18,16 +18,16 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS games (
     game_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    game_type TEXT NOT NULL,          -- 'solo' or 'pvp'
+    game_type TEXT NOT NULL,
     chat_id INTEGER NOT NULL,
     message_id INTEGER,
     player1_id INTEGER NOT NULL,
     player2_id INTEGER,
     player1_pos INTEGER NOT NULL DEFAULT 0,
     player2_pos INTEGER NOT NULL DEFAULT 0,
-    turn INTEGER NOT NULL DEFAULT 1,  -- 1 or 2
+    turn INTEGER NOT NULL DEFAULT 1,
     stake INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'active', -- active/finished/cancelled
+    status TEXT NOT NULL DEFAULT 'active',
     winner_id INTEGER,
     created_at REAL NOT NULL DEFAULT 0
 );
@@ -94,7 +94,6 @@ async def get_or_create_user(user_id: int, username: str, first_name: str) -> di
             cur = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
             row = await cur.fetchone()
         else:
-            # keep username/first_name fresh
             await db.execute(
                 "UPDATE users SET username = ?, first_name = ? WHERE user_id = ?",
                 (username or "", first_name or "", user_id),
@@ -234,6 +233,17 @@ async def get_game(game_id: int) -> dict | None:
         return _game_row_to_dict(row) if row else None
 
 
+async def get_game_by_message(chat_id: int, message_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT * FROM games WHERE chat_id = ? AND message_id = ? "
+            "ORDER BY game_id DESC LIMIT 1",
+            (chat_id, message_id),
+        )
+        row = await cur.fetchone()
+        return _game_row_to_dict(row) if row else None
+
+
 def _game_row_to_dict(row) -> dict:
     keys = [
         "game_id", "game_type", "chat_id", "message_id", "player1_id", "player2_id",
@@ -271,14 +281,4 @@ async def finish_game(game_id: int, winner_id: int | None, status: str = "finish
             "UPDATE games SET status = ?, winner_id = ? WHERE game_id = ?",
             (status, winner_id, game_id),
         )
- 
         await db.commit()
-        async def get_game_by_message(chat_id: int, message_id: int) -> dict | None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(
-            "SELECT * FROM games WHERE chat_id = ? AND message_id = ? "
-            "ORDER BY game_id DESC LIMIT 1",
-            (chat_id, message_id),
-        )
-        row = await cur.fetchone()
-        return _game_row_to_dict(row) if row else None
