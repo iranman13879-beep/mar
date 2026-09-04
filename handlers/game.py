@@ -1,5 +1,4 @@
 from aiogram import Router, F, Bot
-from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message, BufferedInputFile, InputMediaPhoto
 
 import database as db
@@ -47,7 +46,7 @@ async def cb_start_solo(callback: CallbackQuery, bot: Bot):
         f"🎮 <b>بازی تکی شروع شد!</b>\n"
         f"هزینه ورود: {fee} سکه\n"
         f"موقعیت: خانه 0\n\n"
-        f"🎲 دکمه رو بزن یا خودت ایموجی 🎲 رو به‌عنوان پیام بفرست تا تاس بندازی."
+        f"🎲 دکمه رو بزن تا تاس بندازی."
     )
     try:
         await callback.message.delete()
@@ -63,60 +62,6 @@ async def cb_start_solo(callback: CallbackQuery, bot: Bot):
     await callback.answer()
 
 
-async def _perform_solo_roll(bot: Bot, game: dict, chat_id: int, message_id: int, dice: int) -> dict:
-    game_id = game["game_id"]
-    result = apply_move(game["player1_pos"], dice)
-    await db.update_game_position(game_id, 1, result["final_to"])
-
-    user = await db.get_user(game["player1_id"])
-    name = _name_of(user, game["player1_id"])
-
-    event_text = ""
-    if result["event"] == "overshoot":
-        event_text = "🚫 عدد بزرگه، از خونه ۱۰۰ رد می‌شی! دوباره تلاش کن."
-    elif result["event"] == "snake":
-        event_text = f"🐍 وای نه! مار قورتت داد و رفتی خونه {result['final_to']}."
-    elif result["event"] == "ladder":
-        event_text = f"🪜 چه شانسی! از نردبان رفتی بالا تا خونه {result['final_to']}."
-
-    if result["won"]:
-        reward = await db.get_setting("solo_win_reward")
-        await db.add_coins(game["player1_id"], reward)
-        await db.increment_stats(game["player1_id"], won=True)
-        await db.finish_game(game_id, winner_id=game["player1_id"])
-
-        img = render_board(p1_pos=100, p1_label=name)
-        caption = (
-            f"🎉 <b>تبریک {name}!</b>\n"
-            f"🎲 تاس: {dice}\n"
-            f"🏁 به خونه ۱۰۰ رسیدی و برنده شدی!\n"
-            f"💰 جایزه: +{reward} سکه"
-        )
-        await bot.edit_message_media(
-            media=InputMediaPhoto(media=BufferedInputFile(img, filename="board.png"),
-                                   caption=caption, parse_mode="HTML"),
-            chat_id=chat_id,
-            message_id=message_id,
-            reply_markup=kb.solo_finished_keyboard(),
-        )
-        return result
-
-    img = render_board(p1_pos=result["final_to"], p1_label=name)
-    caption_lines = [f"🎮 <b>بازی تکی</b> — {name}", f"🎲 تاس: {dice}"]
-    if event_text:
-        caption_lines.append(event_text)
-    caption_lines.append(f"📍 موقعیت فعلی: خانه {result['final_to']}")
-    caption = "\n".join(caption_lines)
-    await bot.edit_message_media(
-        media=InputMediaPhoto(media=BufferedInputFile(img, filename="board.png"),
-                               caption=caption, parse_mode="HTML"),
-        chat_id=chat_id,
-        message_id=message_id,
-        reply_markup=kb.solo_roll_keyboard(game_id),
-    )
-    return result
-
-
 @router.callback_query(F.data.startswith("solo:roll:"))
 async def cb_solo_roll(callback: CallbackQuery, bot: Bot):
     game_id = int(callback.data.split(":")[2])
@@ -129,8 +74,57 @@ async def cb_solo_roll(callback: CallbackQuery, bot: Bot):
         return
 
     dice = roll_dice()
-    result = await _perform_solo_roll(bot, game, callback.message.chat.id, callback.message.message_id, dice)
-    await callback.answer("🏆 بردی!" if result["won"] else None)
+    result = apply_move(game["player1_pos"], dice)
+    await db.update_game_position(game_id, 1, result["final_to"])
+
+    user = await db.get_user(callback.from_user.id)
+    name = _name_of(user, callback.from_user.id)
+
+    event_text = ""
+    if result["event"] == "overshoot":
+        event_text = "🚫 عدد بزرگه، از خونه ۱۰۰ رد می‌شی! دوباره تلاش کن."
+    elif result["event"] == "snake":
+        event_text = f"🐍 وای نه! مار قورتت داد و رفتی خونه {result['final_to']}."
+    elif result["event"] == "ladder":
+        event_text = f"🪜 چه شانسی! از نردبان رفتی بالا تا خونه {result['final_to']}."
+
+    if result["won"]:
+        reward = await db.get_setting("solo_win_reward")
+        await db.add_coins(callback.from_user.id, reward)
+        await db.increment_stats(callback.from_user.id, won=True)
+        await db.finish_game(game_id, winner_id=callback.from_user.id)
+
+        img = render_board(p1_pos=100, p1_label=name)
+        caption = (
+            f"🎉 <b>تبریک {name}!</b>\n"
+            f"🎲 تاس: {dice}\n"
+            f"🏁 به خونه ۱۰۰ رسیدی و برنده شدی!\n"
+            f"💰 جایزه: +{reward} سکه"
+        )
+        await bot.edit_message_media(
+            media=InputMediaPhoto(media=BufferedInputFile(img, filename="board.png"),
+                                   caption=caption, parse_mode="HTML"),
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            reply_markup=kb.solo_finished_keyboard(),
+        )
+        await callback.answer("🏆 بردی!")
+        return
+
+    img = render_board(p1_pos=result["final_to"], p1_label=name)
+    caption_lines = [f"🎮 <b>بازی تکی</b> — {name}", f"🎲 تاس: {dice}"]
+    if event_text:
+        caption_lines.append(event_text)
+    caption_lines.append(f"📍 موقعیت فعلی: خانه {result['final_to']}")
+    caption = "\n".join(caption_lines)
+    await bot.edit_message_media(
+        media=InputMediaPhoto(media=BufferedInputFile(img, filename="board.png"),
+                               caption=caption, parse_mode="HTML"),
+        chat_id=callback.message.chat.id,
+        message_id=callback.message.message_id,
+        reply_markup=kb.solo_roll_keyboard(game_id),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("solo:cancel:"))
@@ -152,244 +146,199 @@ async def cb_solo_cancel(callback: CallbackQuery):
 
 
 # ============================================================
-#                      PVP GAME
+#                    MULTIPLAYER MATCHMAKING
 # ============================================================
+
+def _players_from_game(game: dict) -> list[int]:
+    return [game[f"player{i}_id"] for i in range(1, game["max_players"] + 1)
+            if game.get(f"player{i}_id")]
+
+
+async def _send_private_game_view(bot: Bot, game: dict, user_id: int):
+    slot = await db.get_player_slot(game, user_id)
+    if not slot:
+        return False
+
+    if game["status"] != "active":
+        await bot.send_message(user_id, "❌ این بازی دیگر فعال نیست.")
+        return True
+
+    players = _players_from_game(game)
+    names = []
+    for i in range(1, game["max_players"] + 1):
+        u = await db.get_user(game[f"player{i}_id"])
+        names.append(_name_of(u, game[f"player{i}_id"]))
+
+    positions = [game[f"player{i}_pos"] for i in range(1, game["max_players"] + 1)]
+    img = render_board(
+        p1_pos=positions[0],
+        p2_pos=positions[1] if len(positions) > 1 else None,
+        p3_pos=positions[2] if len(positions) > 2 else None,
+        p4_pos=positions[3] if len(positions) > 3 else None,
+        p1_label=names[0],
+        p2_label=names[1] if len(names) > 1 else "P2",
+        p3_label=names[2] if len(names) > 2 else "P3",
+        p4_label=names[3] if len(names) > 3 else "P4",
+    )
+    turn_name = names[game["turn"] - 1]
+    caption = (
+        f"⚔️ <b>مار و پله {game['max_players']} نفره</b>\n"
+        f"💰 شرط هر نفر: {game['stake']} سکه\n\n"
+        f"🎯 نوبت: <b>{turn_name}</b>\n"
+        f"📍 موقعیت تو: خانه {game[f'player{slot}_pos']}"
+    )
+    sent = await bot.send_photo(
+        user_id,
+        BufferedInputFile(img, filename="board.png"),
+        caption=caption,
+        reply_markup=kb.private_game_keyboard(game["game_id"]),
+    )
+    await db.update_player_message(game["game_id"], slot, sent.message_id)
+    return True
+
 
 @router.callback_query(F.data == "menu:pvp")
 async def cb_pvp_intro(callback: CallbackQuery):
     default_stake = await db.get_setting("pvp_default_stake")
     text = (
-        "⚔️ <b>چالش با دوست</b>\n\n"
-        "برای دعوت یه دوست به بازی، روی یکی از پیام‌های اون توی همین چت "
-        "(گروه یا خصوصی) ریپلای کن و این دستور رو بفرست:\n\n"
-        f"<code>/pvp {default_stake}</code>\n\n"
-        "عدد جلوی دستور، مقدار سکه‌ای‌ه که هر دو نفر شرط می‌بندید "
-        "(می‌تونی خالی بذاری تا مقدار پیش‌فرض استفاده بشه).\n\n"
-        "همچنین می‌تونی به‌جای ریپلای، یوزرنیم دوستت رو بنویسی:\n"
-        f"<code>/pvp @username {default_stake}</code>"
+        "⚔️ <b>بازی چندنفره مار و پله</b>\n\n"
+        "🎯 اول مشخص کن چند نفره بازی کنی، بعد «جستجو» شروع می‌شود.\n"
+        "بات به‌صورت خودکار بازیکن‌های منتظر را پیدا می‌کند و بازی را داخل چت خصوصی بات شروع می‌کند.\n\n"
+        f"💰 شرط هر نفر: <b>{default_stake} سکه</b>\n"
+        "🎲 حالت‌ها: ۲، ۳ یا ۴ نفره\n\n"
+        "🔥 لازم نیست آیدی کسی را وارد کنی یا لابی بسازی!"
     )
-    await callback.message.edit_text(text, reply_markup=kb.back_to_menu())
+    await callback.message.edit_text(text, reply_markup=kb.pvp_mode_keyboard())
     await callback.answer()
 
 
-@router.message(Command("pvp"))
-async def cmd_pvp(message: Message, bot: Bot):
-    challenger = await db.get_or_create_user(
-        message.from_user.id, message.from_user.username, message.from_user.first_name
-    )
-    if challenger["is_banned"]:
-        await message.reply("⛔️ شما مسدود شده‌اید.")
-        return
-
-    args = message.text.split()[1:]
-    opponent_id = None
-    opponent_username = None
-    opponent_first_name = None
-    stake_arg = None
-
-    if message.reply_to_message and message.reply_to_message.from_user:
-        opp = message.reply_to_message.from_user
-        if opp.is_bot:
-            await message.reply("نمی‌تونی ربات رو به چالش دعوت کنی 😅")
-            return
-        opponent_id = opp.id
-        opponent_username = opp.username
-        opponent_first_name = opp.first_name
-        if args:
-            stake_arg = args[0]
-    elif args and args[0].startswith("@"):
-        found = await db.find_user_by_username(args[0])
-        if not found:
-            await message.reply(
-                "❗️ اون کاربر هنوز ربات رو استارت نکرده. اول باید یه بار به ربات پیام بده."
-            )
-            return
-        opponent_id = found["user_id"]
-        opponent_username = found["username"]
-        opponent_first_name = found["first_name"]
-        if len(args) > 1:
-            stake_arg = args[1]
-    else:
-        await message.reply(
-            "❗️ روی پیام دوستت ریپلای کن و /pvp بزن، یا از فرمت "
-            "<code>/pvp @username مبلغ</code> استفاده کن."
-        )
-        return
-
-    if opponent_id == message.from_user.id:
-        await message.reply("نمی‌تونی خودت رو به چالش دعوت کنی 😄")
-        return
-
-    default_stake = await db.get_setting("pvp_default_stake")
-    if stake_arg:
-        if not stake_arg.isdigit() or int(stake_arg) <= 0:
-            await message.reply("مبلغ شرط باید یه عدد مثبت باشه.")
-            return
-        stake = int(stake_arg)
-    else:
-        stake = default_stake
-
-    if challenger["coins"] < stake:
-        await message.reply(f"💸 سکه کافی نداری! برای این شرط {stake} سکه لازمه.")
-        return
-
-    await db.get_or_create_user(opponent_id, opponent_username, opponent_first_name)
-
-    game_id = await db.create_game(
-        "pvp", message.chat.id, message.from_user.id, opponent_id, stake
-    )
-    await db.finish_game(game_id, winner_id=None, status="pending")
-
-    challenger_name = _name_of(challenger, message.from_user.id)
-    opponent_name = "@" + opponent_username if opponent_username else (opponent_first_name or str(opponent_id))
-
-    text = (
-        f"⚔️ <b>دعوت به چالش!</b>\n\n"
-        f"{challenger_name} از {opponent_name} دعوت کرد تا با {stake} سکه شرط، "
-        f"مار و پله بازی کنن.\n\n"
-        f"{opponent_name} قبول می‌کنی؟"
-    )
-    sent = await message.answer(text, reply_markup=kb.pvp_invite_keyboard(game_id))
-    await db.update_game_message(game_id, sent.message_id)
-
-
-@router.callback_query(F.data.startswith("pvp:accept:"))
-async def cb_pvp_accept(callback: CallbackQuery, bot: Bot):
-    game_id = int(callback.data.split(":")[2])
-    game = await db.get_game(game_id)
-    if not game or game["status"] != "pending":
-        await callback.answer("این دعوت دیگه معتبر نیست.", show_alert=True)
-        return
-    if callback.from_user.id != game["player2_id"]:
-        await callback.answer("این دعوت برای تو نیست 😅", show_alert=True)
-        return
-
-    p1 = await db.get_user(game["player1_id"])
-    p2 = await db.get_user(game["player2_id"])
-    stake = game["stake"]
-
-    if p1["coins"] < stake:
-        await db.finish_game(game_id, winner_id=None, status="cancelled")
-        await callback.message.edit_text("❌ دعوت‌کننده دیگه سکه کافی نداره. بازی لغو شد.")
-        await callback.answer()
-        return
-    if p2["coins"] < stake:
-        await callback.answer(f"💸 تو هم باید حداقل {stake} سکه داشته باشی!", show_alert=True)
-        return
-
-    await db.add_coins(p1["user_id"], -stake)
-    await db.add_coins(p2["user_id"], -stake)
-    await db.finish_game(game_id, winner_id=None, status="active")
-    await db.set_turn(game_id, 1)
-
-    p1_name = _name_of(p1, p1["user_id"])
-    p2_name = _name_of(p2, p2["user_id"])
-
-    img = render_board(p1_pos=0, p2_pos=0, p1_label=p1_name, p2_label=p2_name)
-    caption = (
-        f"⚔️ <b>{p1_name}</b> 🆚 <b>{p2_name}</b>\n"
-        f"💰 شرط: {stake} سکه هر نفر (برنده کل {stake * 2} رو می‌بره)\n\n"
-        f"نوبت: {p1_name} 🎲"
-    )
+@router.callback_query(F.data.startswith("pvp:search:"))
+async def cb_matchmaking_search(callback: CallbackQuery, bot: Bot):
     try:
-        await callback.message.delete()
-    except Exception:
-        pass
+        max_players = int(callback.data.split(":")[2])
+    except (ValueError, IndexError):
+        await callback.answer("تعداد بازیکنان نامعتبر است.", show_alert=True)
+        return
+
+    if max_players not in (2, 3, 4):
+        await callback.answer("تعداد بازیکنان نامعتبر است.", show_alert=True)
+        return
+
+    user = await db.get_or_create_user(
+        callback.from_user.id, callback.from_user.username, callback.from_user.first_name
+    )
+    if user["is_banned"]:
+        await callback.answer("⛔️ شما مسدود شده‌اید.", show_alert=True)
+        return
+
+    stake = await db.get_setting("pvp_default_stake")
+    if user["coins"] < stake:
+        await callback.answer(f"💸 برای بازی حداقل {stake} سکه لازم داری.", show_alert=True)
+        return
+
+    status, game_id, players = await db.matchmaking_join(
+        callback.from_user.id, max_players, stake
+    )
+
+    if status == "waiting":
+        count = await db.matchmaking_count(max_players, stake)
+        text = (
+            "🔎 <b>جستجوی حریف شروع شد!</b>\n\n"
+            f"👥 حالت: <b>{max_players} نفره</b>\n"
+            f"💰 شرط: <b>{stake} سکه</b>\n\n"
+            f"⏳ بازیکنان آماده: <b>{count}/{max_players}</b>\n"
+            "منتظر بازیکن‌های دیگر هستیم...\n\n"
+            "وقتی ظرفیت کامل شود، بازی خودکار داخل بات شروع می‌شود. 🎮"
+        )
+        try:
+            await callback.message.edit_text(text, reply_markup=kb.matchmaking_wait_keyboard())
+        except Exception:
+            await callback.message.answer(text, reply_markup=kb.matchmaking_wait_keyboard())
+        await callback.answer("🔎 در حال پیدا کردن حریف...")
+        return
+
+    game = await db.get_game(game_id)
+    if not game:
+        await callback.answer("❌ بازی ساخته نشد؛ دوباره تلاش کن.", show_alert=True)
+        return
+
+    # همه بازیکنان بلافاصله به چت خصوصی بات هدایت می‌شوند و صفحه بازی را می‌گیرند.
+    for uid in players:
+        try:
+            await bot.send_message(uid, "🔥 <b>حریف پیدا شد!</b> بازی شما آماده است؛ تاس بندازید!", parse_mode="HTML")
+            await _send_private_game_view(bot, game, uid)
+        except Exception:
+            # اگر کاربر قبلاً بات را استارت نکرده باشد، پیام تلگرام ممکن است خطا بدهد.
+            pass
+
+    await callback.message.edit_text(
+        "🎉 <b>حریف پیدا شد!</b>\n\n"
+        f"⚔️ بازی {max_players} نفره ساخته شد.\n"
+        "🎮 بازی داخل چت خصوصی بات برایت باز شد.\n\n"
+        "اگر صفحه بازی را نمی‌بینی، بات را باز کن و دوباره /start بزن.",
+        reply_markup=kb.back_to_menu(),
+    )
+    await callback.answer("🎉 حریف پیدا شد!", show_alert=False)
+
+
+@router.callback_query(F.data == "match:cancel")
+async def cb_matchmaking_cancel(callback: CallbackQuery):
+    removed = await db.matchmaking_cancel(callback.from_user.id)
+    if removed:
+        await callback.message.edit_text("❌ جستجوی حریف لغو شد.", reply_markup=kb.back_to_menu())
+        await callback.answer("جستجو لغو شد.")
+    else:
+        await callback.answer("جستجوی فعالی نداری.", show_alert=True)
+
+
+async def _send_private_game_view(bot: Bot, game: dict, user_id: int):
+    slot = await db.get_player_slot(game, user_id)
+    if not slot:
+        return False
+
+    players = _players_from_game(game)
+    if game["status"] == "pending":
+        await bot.send_message(
+            user_id,
+            "⏳ هنوز لابی کامل نشده.\nوقتی ظرفیت تکمیل شود، از همین‌جا وارد بازی می‌شوی.",
+        )
+        return True
+
+    if game["status"] != "active":
+        await bot.send_message(user_id, "❌ این بازی دیگر فعال نیست.")
+        return True
+
+    names = []
+    for i in range(1, game["max_players"] + 1):
+        u = await db.get_user(game[f"player{i}_id"])
+        names.append(_name_of(u, game[f"player{i}_id"]))
+
+    positions = [game[f"player{i}_pos"] for i in range(1, game["max_players"] + 1)]
+    img = render_board(
+        p1_pos=positions[0],
+        p2_pos=positions[1] if len(positions) > 1 else None,
+        p3_pos=positions[2] if len(positions) > 2 else None,
+        p4_pos=positions[3] if len(positions) > 3 else None,
+        p1_label=names[0],
+        p2_label=names[1] if len(names) > 1 else "P2",
+        p3_label=names[2] if len(names) > 2 else "P3",
+        p4_label=names[3] if len(names) > 3 else "P4",
+    )
+    turn_name = names[game["turn"] - 1]
+    caption = (
+        f"⚔️ <b>مار و پله {game['max_players']} نفره</b>\n"
+        f"💰 شرط هر نفر: {game['stake']} سکه\n\n"
+        f"🎯 نوبت: <b>{turn_name}</b>\n"
+        f"📍 موقعیت تو: خانه {game[f'player{slot}_pos']}"
+    )
     sent = await bot.send_photo(
-        callback.message.chat.id,
+        user_id,
         BufferedInputFile(img, filename="board.png"),
         caption=caption,
-        reply_markup=kb.pvp_roll_keyboard(game_id, can_roll=True),
+        reply_markup=kb.private_game_keyboard(game["game_id"]),
     )
-    await db.update_game_message(game_id, sent.message_id)
-    await callback.answer("✅ بازی شروع شد!")
-
-
-@router.callback_query(F.data.startswith("pvp:decline:"))
-async def cb_pvp_decline(callback: CallbackQuery):
-    game_id = int(callback.data.split(":")[2])
-    game = await db.get_game(game_id)
-    if not game or game["status"] != "pending":
-        await callback.answer()
-        return
-    if callback.from_user.id != game["player2_id"]:
-        await callback.answer("این دعوت برای تو نیست 😅", show_alert=True)
-        return
-    await db.finish_game(game_id, winner_id=None, status="cancelled")
-    await callback.message.edit_text("❌ دعوت رد شد.")
-    await callback.answer()
-
-
-async def _perform_pvp_roll(bot: Bot, game: dict, chat_id: int, message_id: int, dice: int) -> dict:
-    game_id = game["game_id"]
-    is_p1_turn = game["turn"] == 1
-    current_player_id = game["player1_id"] if is_p1_turn else game["player2_id"]
-
-    p1 = await db.get_user(game["player1_id"])
-    p2 = await db.get_user(game["player2_id"])
-    p1_name = _name_of(p1, game["player1_id"])
-    p2_name = _name_of(p2, game["player2_id"])
-
-    current_pos = game["player1_pos"] if is_p1_turn else game["player2_pos"]
-    result = apply_move(current_pos, dice)
-    await db.update_game_position(game_id, 1 if is_p1_turn else 2, result["final_to"])
-
-    mover_name = p1_name if is_p1_turn else p2_name
-
-    event_text = ""
-    if result["event"] == "overshoot":
-        event_text = f"🚫 {mover_name} عدد بزرگ آورد و از ۱۰۰ رد شد، نوبت می‌ره به نفر بعد."
-    elif result["event"] == "snake":
-        event_text = f"🐍 {mover_name} به مار خورد و افتاد خونه {result['final_to']}."
-    elif result["event"] == "ladder":
-        event_text = f"🪜 {mover_name} از نردبان رفت بالا تا خونه {result['final_to']}."
-
-    p1_pos = result["final_to"] if is_p1_turn else game["player1_pos"]
-    p2_pos = result["final_to"] if not is_p1_turn else game["player2_pos"]
-
-    if result["won"]:
-        pot = game["stake"] * 2
-        winner_id = current_player_id
-        loser_id = game["player2_id"] if is_p1_turn else game["player1_id"]
-        await db.add_coins(winner_id, pot)
-        await db.increment_stats(winner_id, won=True)
-        await db.increment_stats(loser_id, won=False)
-        await db.finish_game(game_id, winner_id=winner_id)
-
-        img = render_board(p1_pos=p1_pos, p2_pos=p2_pos, p1_label=p1_name, p2_label=p2_name)
-        caption = (
-            f"🎉 <b>{mover_name} برنده شد!</b>\n"
-            f"🎲 تاس: {dice}\n"
-            f"💰 {pot} سکه رو برد!"
-        )
-        await bot.edit_message_media(
-            media=InputMediaPhoto(media=BufferedInputFile(img, filename="board.png"),
-                                   caption=caption, parse_mode="HTML"),
-            chat_id=chat_id,
-            message_id=message_id,
-            reply_markup=kb.pvp_finished_keyboard(),
-        )
-        return result
-
-    next_turn = 2 if is_p1_turn else 1
-    await db.set_turn(game_id, next_turn)
-    next_player_name = p2_name if next_turn == 2 else p1_name
-
-    img = render_board(p1_pos=p1_pos, p2_pos=p2_pos, p1_label=p1_name, p2_label=p2_name)
-    caption_lines = [f"⚔️ <b>{p1_name}</b> 🆚 <b>{p2_name}</b>", f"🎲 {mover_name} انداخت: {dice}"]
-    if event_text:
-        caption_lines.append(event_text)
-    caption_lines.append(f"\nنوبت: {next_player_name} 🎲")
-    caption = "\n".join(caption_lines)
-
-    await bot.edit_message_media(
-        media=InputMediaPhoto(media=BufferedInputFile(img, filename="board.png"),
-                               caption=caption, parse_mode="HTML"),
-        chat_id=chat_id,
-        message_id=message_id,
-        reply_markup=kb.pvp_roll_keyboard(game_id, can_roll=True),
-    )
-    return result
+    await db.update_player_message(game["game_id"], slot, sent.message_id)
+    return True
 
 
 @router.callback_query(F.data.startswith("pvp:roll:"))
@@ -400,39 +349,163 @@ async def cb_pvp_roll(callback: CallbackQuery, bot: Bot):
         await callback.answer("این بازی دیگه فعال نیست.", show_alert=True)
         return
 
-    is_p1_turn = game["turn"] == 1
-    current_player_id = game["player1_id"] if is_p1_turn else game["player2_id"]
-    if callback.from_user.id != current_player_id:
-        await callback.answer("صبر کن، نوبت توئه نیست! ⏳", show_alert=True)
+    slot = await db.get_player_slot(game, callback.from_user.id)
+    if not slot:
+        await callback.answer("این بازی برای تو نیست.", show_alert=True)
         return
+    if game["turn"] != slot:
+        await callback.answer("صبر کن، هنوز نوبت تو نیست! ⏳", show_alert=True)
+        return
+
+    current_player_id = game[f"player{slot}_id"]
+    players = _players_from_game(game)
+    player_data = [await db.get_user(uid) for uid in players]
+    names = [_name_of(u, uid) for u, uid in zip(player_data, players)]
 
     dice = roll_dice()
-    result = await _perform_pvp_roll(bot, game, callback.message.chat.id, callback.message.message_id, dice)
-    await callback.answer("🏆 بردی!" if result["won"] else None)
+    current_pos = game[f"player{slot}_pos"]
+    result = apply_move(current_pos, dice)
+    await db.update_game_position(game_id, slot, result["final_to"])
 
+    if result["won"]:
+        pot = game["stake"] * game["max_players"]
+        await db.add_coins(current_player_id, pot)
+        await db.increment_stats(current_player_id, won=True)
+        for uid in players:
+            if uid != current_player_id:
+                await db.increment_stats(uid, won=False)
+        await db.finish_game(game_id, winner_id=current_player_id)
 
-# ============================================================
-#            NATIVE 🎲 DICE MESSAGE (کاربر خودش می‌فرسته)
-# ============================================================
-
-@router.message(F.dice)
-async def on_native_dice(message: Message, bot: Bot):
-    if message.dice.emoji != "🎲":
+        game = await db.get_game(game_id)
+        positions = [game[f"player{i}_pos"] for i in range(1, game["max_players"] + 1)]
+        img = render_board(
+            p1_pos=positions[0],
+            p2_pos=positions[1] if len(positions) > 1 else None,
+            p3_pos=positions[2] if len(positions) > 2 else None,
+            p4_pos=positions[3] if len(positions) > 3 else None,
+            p1_label=names[0],
+            p2_label=names[1] if len(names) > 1 else "P2",
+            p3_label=names[2] if len(names) > 2 else "P3",
+            p4_label=names[3] if len(names) > 3 else "P4",
+        )
+        caption = f"🏆 <b>{names[slot-1]} برنده شد!</b>\n🎲 تاس: {dice}\n💰 جایزه: {pot} سکه"
+        for i, uid in enumerate(players, 1):
+            mid = game.get(f"player{i}_message_id")
+            if mid:
+                try:
+                    await bot.edit_message_media(
+                        media=InputMediaPhoto(
+                            media=BufferedInputFile(img, filename="board.png"),
+                            caption=caption, parse_mode="HTML"
+                        ),
+                        chat_id=uid, message_id=mid,
+                        reply_markup=kb.pvp_finished_keyboard(),
+                    )
+                except Exception:
+                    pass
+        await callback.answer("🏆 بردی!")
         return
 
-    game = await db.get_active_game_for_player(message.chat.id, message.from_user.id)
-    if not game or not game.get("message_id"):
+    next_turn = (slot % game["max_players"]) + 1
+    await db.set_turn(game_id, next_turn)
+    game = await db.get_game(game_id)
+
+    event_text = ""
+    if result["event"] == "overshoot":
+        event_text = "🚫 از ۱۰۰ رد شد؛ حرکت انجام نشد."
+    elif result["event"] == "snake":
+        event_text = f"🐍 مار! رفتی خانه {result['final_to']}."
+    elif result["event"] == "ladder":
+        event_text = f"🪜 نردبان! رفتی خانه {result['final_to']}."
+
+    positions = [game[f"player{i}_pos"] for i in range(1, game["max_players"] + 1)]
+    img = render_board(
+        p1_pos=positions[0],
+        p2_pos=positions[1] if len(positions) > 1 else None,
+        p3_pos=positions[2] if len(positions) > 2 else None,
+        p4_pos=positions[3] if len(positions) > 3 else None,
+        p1_label=names[0],
+        p2_label=names[1] if len(names) > 1 else "P2",
+        p3_label=names[2] if len(names) > 2 else "P3",
+        p4_label=names[3] if len(names) > 3 else "P4",
+    )
+    caption = (
+        f"⚔️ <b>مار و پله {game['max_players']} نفره</b>\n"
+        f"🎲 {names[slot-1]} انداخت: <b>{dice}</b>\n"
+        f"{event_text}\n"
+        f"🎯 نوبت: <b>{names[next_turn-1]}</b>"
+    )
+
+    for i, uid in enumerate(players, 1):
+        mid = game.get(f"player{i}_message_id")
+        if not mid:
+            continue
+        try:
+            await bot.edit_message_media(
+                media=InputMediaPhoto(
+                    media=BufferedInputFile(img, filename="board.png"),
+                    caption=caption, parse_mode="HTML"
+                ),
+                chat_id=uid, message_id=mid,
+                reply_markup=kb.private_game_keyboard(game_id),
+            )
+        except Exception:
+            pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("pvp:leave:"))
+async def cb_pvp_leave(callback: CallbackQuery, bot: Bot):
+    game_id = int(callback.data.split(":")[2])
+    game = await db.get_game(game_id)
+    if not game or game["status"] != "active":
+        await callback.answer()
+        return
+    slot = await db.get_player_slot(game, callback.from_user.id)
+    if not slot:
+        await callback.answer("تو در این بازی نیستی.", show_alert=True)
         return
 
-    dice_value = message.dice.value  # عدد واقعی که خود تلگرام تولید کرده (۱ تا ۶)
+    await db.finish_game(game_id, winner_id=None, status="cancelled")
+    players = _players_from_game(game)
+    for uid in players:
+        if uid == callback.from_user.id:
+            continue
+        try:
+            await bot.send_message(uid, "❌ بازی به دلیل خروج یکی از بازیکنان لغو شد.")
+        except Exception:
+            pass
+    await callback.message.edit_caption(
+        caption="❌ از بازی خارج شدی؛ بازی لغو شد.",
+        reply_markup=kb.solo_finished_keyboard(),
+    )
+    await callback.answer()
 
-    if game["game_type"] == "solo":
-        if message.from_user.id != game["player1_id"]:
-            return
-        await _perform_solo_roll(bot, game, message.chat.id, game["message_id"], dice_value)
-    else:
-        is_p1_turn = game["turn"] == 1
-        current_player_id = game["player1_id"] if is_p1_turn else game["player2_id"]
-        if message.from_user.id != current_player_id:
-            return
-        await _perform_pvp_roll(bot, game, message.chat.id, game["message_id"], dice_value)
+
+# این handler از /start game_ID استفاده می‌کند و بعد از ورود به ربات، بازی را
+# در چت خصوصی کاربر نمایش می‌دهد. handler معمول /start در handlers/user.py
+# برای /start بدون payload باقی می‌ماند.
+@router.message(F.text.startswith("/start game_"))
+async def cmd_game_start(message: Message, bot: Bot):
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].startswith("game_"):
+        return  # اجازه بده handler عمومی /start پاسخ بدهد.
+
+    try:
+        game_id = int(parts[1][5:])
+    except ValueError:
+        await message.answer("❌ لینک بازی نامعتبر است.")
+        return
+
+    game = await db.get_game(game_id)
+    if not game:
+        await message.answer("❌ این بازی پیدا نشد.")
+        return
+
+    uid = message.from_user.id
+    if uid not in _players_from_game(game):
+        await message.answer("❌ این لینک برای بازیکنان این لابی است.")
+        return
+
+    await db.get_or_create_user(uid, message.from_user.username, message.from_user.first_name)
+    await _send_private_game_view(bot, game, uid)
